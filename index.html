@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Khmer Walkie Talkie (UI Upgrade)</title>
+    <title>Khmer Walkie Talkie (Private Mode)</title>
     
     <!-- Tailwind CSS -->
     <script src="https://cdn.tailwindcss.com"></script>
@@ -84,7 +84,7 @@
             limitToLast,
             serverTimestamp 
         } from 'firebase/database';
-        import { Mic, Radio, Power, Users, Signal, UserPlus, Lock, X, List, AlertCircle, CheckCircle } from 'lucide-react';
+        import { Mic, Radio, Power, Users, Signal, Lock, X, List, AlertCircle, CheckCircle, Phone } from 'lucide-react';
 
         // --- Firebase Configuration ---
         const firebaseConfig = {
@@ -112,8 +112,8 @@
                 return () => clearTimeout(timer);
             }, [onClose]);
 
-            const bgClass = type === 'error' ? 'bg-red-600' : 'bg-green-600';
-            const icon = type === 'error' ? <AlertCircle size={20} /> : <CheckCircle size={20} />;
+            const bgClass = type === 'error' ? 'bg-red-600' : (type === 'private' ? 'bg-purple-600' : 'bg-green-600');
+            const icon = type === 'error' ? <AlertCircle size={20} /> : (type === 'private' ? <Phone size={20} /> : <CheckCircle size={20} />);
 
             return (
                 <div className={`fixed top-4 left-1/2 -translate-x-1/2 z-50 flex items-center gap-3 px-6 py-3 rounded-full shadow-2xl text-white font-medium text-sm toast-enter ${bgClass}`}>
@@ -124,7 +124,7 @@
         };
 
         // --- User List Modal Component ---
-        const UserListModal = ({ users, onClose, currentUserId }) => {
+        const UserListModal = ({ users, onClose, currentUserId, onSelectUser }) => {
             return (
                 <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4 modal-enter">
                     <div className="bg-neutral-800 w-full max-w-sm rounded-3xl border border-neutral-700 shadow-2xl overflow-hidden flex flex-col max-h-[80vh]">
@@ -140,28 +140,43 @@
                         </div>
                         
                         {/* List */}
-                        <div className="overflow-y-auto p-2 flex-1 space-y-1">
+                        <div className="overflow-y-auto p-2 flex-1 space-y-2">
                             {users.length === 0 ? (
                                 <div className="text-center text-neutral-500 py-8">គ្មានអ្នកផ្សេង Online ទេ</div>
                             ) : (
-                                users.map(user => (
-                                    <div key={user.id} className={`flex items-center gap-3 p-3 rounded-xl ${user.id === currentUserId ? 'bg-green-900/30 border border-green-800/50' : 'bg-neutral-700/30'}`}>
-                                        <div className="w-10 h-10 rounded-full bg-neutral-700 flex items-center justify-center text-lg font-bold text-neutral-300">
-                                            {user.name.charAt(0).toUpperCase()}
-                                        </div>
-                                        <div className="flex-1">
-                                            <div className="font-bold text-white text-sm flex items-center gap-2">
-                                                {user.name}
-                                                {user.id === currentUserId && <span className="text-[10px] bg-green-600 px-1.5 rounded text-white">Me</span>}
+                                users.map(user => {
+                                    const isMe = user.id === currentUserId;
+                                    return (
+                                        <div 
+                                            key={user.id} 
+                                            onClick={() => !isMe && onSelectUser(user)}
+                                            className={`flex items-center gap-3 p-3 rounded-xl transition-all ${isMe ? 'bg-green-900/20 border border-green-800/30' : 'bg-neutral-700/30 hover:bg-neutral-600 cursor-pointer active:scale-95'}`}
+                                        >
+                                            <div className={`w-10 h-10 rounded-full flex items-center justify-center text-lg font-bold text-white shadow-md ${isMe ? 'bg-green-700' : 'bg-neutral-600'}`}>
+                                                {user.name.charAt(0).toUpperCase()}
                                             </div>
-                                            <div className="text-[10px] text-green-400 flex items-center gap-1">
-                                                <div className="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse"></div>
-                                                Online
+                                            <div className="flex-1">
+                                                <div className="font-bold text-white text-sm flex items-center gap-2">
+                                                    {user.name}
+                                                    {isMe && <span className="text-[10px] bg-green-600 px-1.5 rounded text-white">Me</span>}
+                                                </div>
+                                                <div className="text-[10px] text-green-400 flex items-center gap-1">
+                                                    <div className="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse"></div>
+                                                    Online
+                                                </div>
                                             </div>
+                                            {!isMe && (
+                                                <div className="p-2 bg-purple-600/20 rounded-full text-purple-400">
+                                                    <Phone size={16} />
+                                                </div>
+                                            )}
                                         </div>
-                                    </div>
-                                ))
+                                    );
+                                })
                             )}
+                        </div>
+                        <div className="p-3 text-center text-xs text-neutral-500 bg-neutral-900 border-t border-neutral-700">
+                            ចុចលើឈ្មោះដើម្បីនិយាយឯកជន (Private)
                         </div>
                     </div>
                 </div>
@@ -181,10 +196,13 @@
             const [powerOn, setPowerOn] = useState(false);
             const [currentChannel, setCurrentChannel] = useState('01');
             const [isTransmitting, setIsTransmitting] = useState(false);
-            const [incomingTransmission, setIncomingTransmission] = useState(null); 
+            const [incomingTransmission, setIncomingTransmission] = useState(null); // { userId, userName, type: 'public' | 'private' }
+            
+            // Private Mode State
+            const [privateTarget, setPrivateTarget] = useState(null); // { id, name } or null
             
             // Users Data
-            const [onlineUsers, setOnlineUsers] = useState([]); // Array of user objects
+            const [onlineUsers, setOnlineUsers] = useState([]);
             const [showUserList, setShowUserList] = useState(false);
 
             // Audio Refs
@@ -241,7 +259,6 @@
                         status: 'online',
                         lastSeen: serverTimestamp()
                     });
-                    
                     onDisconnect(userPresenceRef).remove();
                 } else {
                     remove(userPresenceRef);
@@ -249,20 +266,16 @@
                 }
 
                 return () => {
-                    if (powerOn) {
-                         remove(userPresenceRef);
-                    }
+                    if (powerOn) remove(userPresenceRef);
                 };
             }, [powerOn, userId, userName, currentChannel]);
 
-            // --- 3. Active Users Listener (Fetch List) ---
+            // --- 3. Active Users Listener ---
             useEffect(() => {
                 const usersRef = ref(db, `channels/channel_${currentChannel}/users`);
-                
                 const unsubscribe = onValue(usersRef, (snapshot) => {
                     if (snapshot.exists()) {
                         const usersData = snapshot.val();
-                        // Convert object to array
                         const usersList = Object.keys(usersData).map(key => ({
                             id: key,
                             ...usersData[key]
@@ -272,32 +285,32 @@
                         setOnlineUsers([]);
                     }
                 });
-
                 return () => unsubscribe();
             }, [currentChannel]);
 
-            // --- 4. Incoming Transmission Status Listener ---
+            // --- 4. Incoming Status Listener (Public) ---
             useEffect(() => {
                 if (!userId || !powerOn) return;
 
                 const statusRef = ref(db, `channels/channel_${currentChannel}/status`);
-                
                 const unsubscribe = onValue(statusRef, (snapshot) => {
                     const data = snapshot.val();
+                    // Public reception logic
                     if (data && data.isActive && data.userId !== userId) {
                         setIncomingTransmission({
                             userId: data.userId,
-                            userName: data.userName || 'Unknown'
+                            userName: data.userName,
+                            type: 'public'
                         });
                     } else {
-                        setIncomingTransmission(null);
+                        // Only clear if NOT receiving private
+                        setIncomingTransmission(prev => prev && prev.type === 'private' ? prev : null);
                     }
                 });
-
                 return () => unsubscribe();
             }, [userId, powerOn, currentChannel]);
 
-            // --- 5. Audio Data Listener ---
+            // --- 5. Audio Data Listener (Public) ---
             useEffect(() => {
                 if (!userId || !powerOn) return;
 
@@ -312,9 +325,42 @@
                          playPCMChunk(data.pcmData);
                     }
                 });
-
                 return () => unsubscribe();
             }, [userId, powerOn, currentChannel]);
+
+            // --- 6. Audio Data Listener (PRIVATE) ---
+            useEffect(() => {
+                if (!userId || !powerOn) return;
+
+                // Listen to MY private stream
+                const privateAudioRef = ref(db, `private_stream/${userId}`);
+                const recentQuery = query(privateAudioRef, limitToLast(1));
+
+                const unsubscribe = onChildAdded(recentQuery, (snapshot) => {
+                    const data = snapshot.val();
+                    if (isTransmittingRef.current) return;
+
+                    if (data && data.pcmData) {
+                        // Update UI to show incoming private call
+                        setIncomingTransmission({
+                            userId: data.senderId,
+                            userName: data.senderName,
+                            type: 'private'
+                        });
+                        
+                        playPCMChunk(data.pcmData);
+
+                        // Auto-clear incoming status after a short delay (UI only)
+                        // In real PTT, status usually clears when stream stops, 
+                        // but here we use packet arrival to trigger UI briefly
+                        setTimeout(() => {
+                             setIncomingTransmission(prev => prev && prev.type === 'private' && prev.userId === data.senderId ? null : prev);
+                        }, 500);
+                    }
+                });
+                return () => unsubscribe();
+            }, [userId, powerOn]);
+
 
             // --- Audio Logic ---
             const playPCMChunk = async (base64Data) => {
@@ -412,7 +458,8 @@
             const startTransmission = async (e) => {
                 if(e) e.preventDefault();
                 
-                if (onlineUsers.length <= 1) {
+                // Allow private transmission even if alone in public channel
+                if (!privateTarget && onlineUsers.length <= 1) {
                     showToast("គ្មានអ្នកផ្សេង Online ទេ។ សូមរង់ចាំ...", "error");
                     return;
                 }
@@ -439,7 +486,6 @@
                     streamRef.current = stream;
                     
                     const source = ctx.createMediaStreamSource(stream);
-                    
                     if (analyserRef.current) {
                         source.connect(analyserRef.current);
                     }
@@ -475,26 +521,42 @@
                         }
                         const base64data = window.btoa(binary);
 
-                        const audioRef = ref(db, `channels/channel_${currentChannel}/audio_stream`);
-                        push(audioRef, {
-                            userId: userId,
-                            pcmData: base64data,
-                        });
+                        // ROUTING LOGIC: Private vs Public
+                        if (privateTarget) {
+                            // Push to Target's private stream
+                            const privateRef = ref(db, `private_stream/${privateTarget.id}`);
+                            push(privateRef, {
+                                senderId: userId,
+                                senderName: userName,
+                                pcmData: base64data,
+                                timestamp: serverTimestamp()
+                            });
+                        } else {
+                            // Push to Public Channel
+                            const audioRef = ref(db, `channels/channel_${currentChannel}/audio_stream`);
+                            push(audioRef, {
+                                userId: userId,
+                                pcmData: base64data,
+                            });
+                        }
                     };
 
                     setIsTransmitting(true);
                     isTransmittingRef.current = true;
                     
-                    const statusRef = ref(db, `channels/channel_${currentChannel}/status`);
-                    onDisconnect(statusRef).update({ isActive: false });
-                    await set(statusRef, {
-                        isActive: true,
-                        userId: userId,
-                        userName: userName
-                    });
-
-                    const audioRef = ref(db, `channels/channel_${currentChannel}/audio_stream`);
-                    remove(audioRef);
+                    if (!privateTarget) {
+                        const statusRef = ref(db, `channels/channel_${currentChannel}/status`);
+                        onDisconnect(statusRef).update({ isActive: false });
+                        await set(statusRef, {
+                            isActive: true,
+                            userId: userId,
+                            userName: userName
+                        });
+                        
+                        // Clean up old public stream
+                        const audioRef = ref(db, `channels/channel_${currentChannel}/audio_stream`);
+                        remove(audioRef);
+                    }
 
                     playBeep(600, 0.1);
 
@@ -525,9 +587,11 @@
                 isTransmittingRef.current = false;
                 playBeep(400, 0.1);
 
-                const statusRef = ref(db, `channels/channel_${currentChannel}/status`);
-                onDisconnect(statusRef).cancel();
-                await update(statusRef, { isActive: false });
+                if (!privateTarget) {
+                    const statusRef = ref(db, `channels/channel_${currentChannel}/status`);
+                    onDisconnect(statusRef).cancel();
+                    await update(statusRef, { isActive: false });
+                }
             };
 
             const playBeep = (freq, duration) => {
@@ -548,6 +612,11 @@
 
             const handleChannelChange = (delta) => {
                 if (!powerOn) return;
+                // Disable channel change while in private mode
+                if (privateTarget) {
+                    showToast("សូមចាកចេញពី Private Mode ជាមុនសិន", "error");
+                    return;
+                }
                 let newCh = parseInt(currentChannel) + delta;
                 if (newCh < 1) newCh = 1;
                 if (newCh > 99) newCh = 99;
@@ -586,8 +655,20 @@
                     setPowerOn(false);
                     isTransmittingRef.current = false;
                     setIsTransmitting(false);
+                    setPrivateTarget(null); // Reset private on power off
                     showToast("បានបិទម៉ាស៊ីន (Power OFF)", "info");
                 }
+            };
+
+            const handleUserSelect = (targetUser) => {
+                setPrivateTarget(targetUser);
+                setShowUserList(false);
+                showToast(`បានចូល Private Mode ជាមួយ ${targetUser.name}`, "private");
+            };
+
+            const exitPrivateMode = () => {
+                setPrivateTarget(null);
+                showToast("បានត្រឡប់មកប៉ុស្តិ៍សាធារណៈវិញ", "info");
             };
 
             // --- UI: Name Input Modal ---
@@ -628,6 +709,7 @@
 
             // --- Render Main App ---
             const isAlone = onlineUsers.length <= 1;
+            const isPrivate = !!privateTarget;
 
             return (
                 <div className="min-h-screen bg-neutral-900 flex items-center justify-center p-4 font-sans no-select overflow-hidden touch-none relative">
@@ -640,15 +722,16 @@
                         <UserListModal 
                             users={onlineUsers} 
                             currentUserId={userId} 
-                            onClose={() => setShowUserList(false)} 
+                            onClose={() => setShowUserList(false)}
+                            onSelectUser={handleUserSelect}
                         />
                     )}
 
-                    <div className="relative w-full max-w-sm bg-neutral-800 rounded-[3rem] shadow-2xl border-4 border-neutral-700 flex flex-col overflow-hidden">
+                    <div className={`relative w-full max-w-sm bg-neutral-800 rounded-[3rem] shadow-2xl border-4 ${isPrivate ? 'border-purple-600' : 'border-neutral-700'} flex flex-col overflow-hidden transition-colors duration-500`}>
                         
                         {/* Antenna */}
                         <div className="absolute -top-16 right-8 w-6 h-24 bg-neutral-700 rounded-t-lg border-2 border-neutral-600 z-0"></div>
-                        <div className="absolute -top-4 left-8 w-3 h-6 bg-red-600 rounded-sm z-0 animate-pulse"></div>
+                        <div className={`absolute -top-4 left-8 w-3 h-6 ${isPrivate ? 'bg-purple-600' : 'bg-red-600'} rounded-sm z-0 animate-pulse`}></div>
 
                         {/* Speaker Grille */}
                         <div className="mt-8 mx-auto w-3/4 grid grid-cols-6 gap-1 z-10 opacity-50">
@@ -658,7 +741,7 @@
                         </div>
 
                         {/* LCD Screen */}
-                        <div className="mx-6 mt-6 bg-[#9ea792] p-4 rounded-md shadow-inner border-4 border-neutral-600 relative overflow-hidden">
+                        <div className={`mx-6 mt-6 p-4 rounded-md shadow-inner border-4 border-neutral-600 relative overflow-hidden transition-colors duration-500 ${isPrivate ? 'bg-purple-200' : 'bg-[#9ea792]'}`}>
                             <div className="absolute inset-0 bg-green-900 opacity-10 pointer-events-none grid grid-cols-12 gap-px"></div>
                             
                             {powerOn ? (
@@ -669,31 +752,48 @@
                                             <span>ON: {onlineUsers.length}</span>
                                         </div>
                                         <div className="flex items-center gap-1">
-                                            <Signal size={14} />
+                                            {isPrivate ? <Lock size={14} /> : <Signal size={14} />}
                                             <span>CH {currentChannel}</span>
                                         </div>
                                     </div>
 
                                     <div className="text-center">
                                         {isTransmitting ? (
-                                            <div className="text-red-700 font-bold text-lg animate-pulse flex flex-col items-center">
+                                            <div className={`${isPrivate ? 'text-purple-700' : 'text-red-700'} font-bold text-lg animate-pulse flex flex-col items-center`}>
                                                 <span>TRANSMITTING</span>
-                                                <span className="text-xs mt-1">{userName}</span>
+                                                <span className="text-xs mt-1">{isPrivate ? `TO: ${privateTarget.name}` : userName}</span>
                                             </div>
                                         ) : incomingTransmission ? (
-                                            <div className="text-green-800 font-bold text-lg flex flex-col items-center">
-                                                <span>RECEIVING</span>
-                                                <span className="text-sm truncate max-w-full">{String(incomingTransmission.userName)}</span>
+                                            <div className={`${incomingTransmission.type === 'private' ? 'text-purple-800' : 'text-green-800'} font-bold text-lg flex flex-col items-center`}>
+                                                <span>{incomingTransmission.type === 'private' ? 'PRIVATE CALL' : 'RECEIVING'}</span>
+                                                <span className="text-sm truncate max-w-full">{incomingTransmission.userName}</span>
                                             </div>
                                         ) : (
                                             <div className="flex flex-col items-center">
-                                                <div className="text-neutral-600 text-lg font-mono">STANDBY</div>
-                                                <div className="text-neutral-500 text-xs mt-1 font-mono">{userName}</div>
+                                                {isPrivate ? (
+                                                    <>
+                                                        <div className="text-purple-800 text-lg font-bold">PRIVATE</div>
+                                                        <div className="text-purple-600 text-sm font-bold flex items-center gap-1 mt-1">
+                                                            <Lock size={12}/> {privateTarget.name}
+                                                        </div>
+                                                        <button 
+                                                            onClick={exitPrivateMode}
+                                                            className="mt-2 text-[10px] bg-red-500/20 text-red-600 px-2 py-1 rounded hover:bg-red-500/30 font-bold"
+                                                        >
+                                                            [ EXIT PRIVATE ]
+                                                        </button>
+                                                    </>
+                                                ) : (
+                                                    <>
+                                                        <div className="text-neutral-600 text-lg font-mono">STANDBY</div>
+                                                        <div className="text-neutral-500 text-xs mt-1 font-mono">{userName}</div>
+                                                    </>
+                                                )}
                                             </div>
                                         )}
                                     </div>
 
-                                    <div className="text-4xl font-black font-mono text-center tracking-widest text-neutral-800 opacity-80">
+                                    <div className={`text-4xl font-black font-mono text-center tracking-widest opacity-80 ${isPrivate ? 'text-purple-900' : 'text-neutral-800'}`}>
                                         {currentChannel}
                                     </div>
                                 </div>
@@ -730,15 +830,15 @@
                                     <span className="text-[10px] text-gray-400 uppercase tracking-wider">Channel</span>
                                     <div className="flex items-center gap-3">
                                         <button 
-                                            disabled={!powerOn}
+                                            disabled={!powerOn || isPrivate}
                                             onClick={() => handleChannelChange(-1)}
                                             className="w-10 h-10 bg-neutral-700 rounded-lg flex items-center justify-center active:bg-neutral-600 disabled:opacity-50 text-white"
                                         >
                                             -
                                         </button>
-                                        <span className="text-green-500 font-mono text-xl w-6 text-center">{currentChannel}</span>
+                                        <span className={`font-mono text-xl w-6 text-center ${isPrivate ? 'text-purple-500' : 'text-green-500'}`}>{currentChannel}</span>
                                         <button 
-                                            disabled={!powerOn}
+                                            disabled={!powerOn || isPrivate}
                                             onClick={() => handleChannelChange(1)}
                                             className="w-10 h-10 bg-neutral-700 rounded-lg flex items-center justify-center active:bg-neutral-600 disabled:opacity-50 text-white"
                                         >
@@ -750,7 +850,7 @@
 
                             <div className="relative group">
                                 <button
-                                    disabled={!powerOn || isAlone}
+                                    disabled={!powerOn || (isAlone && !isPrivate)}
                                     onMouseDown={startTransmission}
                                     onMouseUp={stopTransmission}
                                     onMouseLeave={stopTransmission}
@@ -761,13 +861,15 @@
                                         border-b-8 active:border-b-0 active:translate-y-2 select-none
                                         flex items-center justify-center gap-3
                                         ${powerOn 
-                                            ? isAlone
+                                            ? isAlone && !isPrivate
                                                 ? 'bg-neutral-600 border-neutral-700 cursor-not-allowed opacity-70' 
-                                                : 'bg-orange-600 border-orange-800 hover:bg-orange-500 cursor-pointer' 
+                                                : isPrivate
+                                                    ? 'bg-purple-600 border-purple-800 hover:bg-purple-500 cursor-pointer'
+                                                    : 'bg-orange-600 border-orange-800 hover:bg-orange-500 cursor-pointer' 
                                             : 'bg-neutral-600 border-neutral-700 cursor-not-allowed opacity-50'}
                                     `}
                                 >
-                                    {isAlone && powerOn ? (
+                                    {isAlone && powerOn && !isPrivate ? (
                                         <>
                                             <Lock size={20} className="text-neutral-400" />
                                             <span className="text-sm">WAITING FOR USERS...</span>
@@ -784,7 +886,7 @@
                             </div>
 
                             <div className="mt-2 text-center h-4">
-                                {isAlone && powerOn ? (
+                                {isAlone && powerOn && !isPrivate ? (
                                     <p className="text-yellow-500 text-xs animate-pulse">កំពុងរង់ចាំអ្នកផ្សេង Online...</p>
                                 ) : powerOn ? (
                                     <button 
@@ -807,7 +909,7 @@
                     </div>
 
                     <div className="fixed bottom-4 flex flex-col items-center gap-1 text-neutral-500 text-xs">
-                        <p>ចុចប៊ូតុង <span className="text-orange-500 font-bold">PUSH TO TALK</span> ឲ្យជាប់ដើម្បីនិយាយ</p>
+                        <p>ចុចប៊ូតុង <span className={`${isPrivate ? 'text-purple-500' : 'text-orange-500'} font-bold`}>PUSH TO TALK</span> ឲ្យជាប់ដើម្បីនិយាយ</p>
                         <div className="flex items-center gap-1">
                             <span>ត្រូវប្រាកដថាបានបើក</span>
                             <Power size={12} className="text-green-500"/>
