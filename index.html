@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Khmer Walkie Talkie (No Auth)</title>
+    <title>Khmer Walkie Talkie (Real Audio)</title>
     
     <!-- Tailwind CSS -->
     <script src="https://cdn.tailwindcss.com"></script>
@@ -26,11 +26,10 @@
     
     <style>
         body {
-            background-color: #171717; /* neutral-900 */
+            background-color: #171717;
             color: white;
             font-family: 'Noto Sans Khmer', sans-serif;
         }
-        /* Hide scrollbar for cleaner look */
         ::-webkit-scrollbar {
             display: none;
         }
@@ -43,13 +42,15 @@
         import React, { useState, useEffect, useRef } from 'react';
         import { createRoot } from 'react-dom/client';
         import { initializeApp } from 'firebase/app';
-        // REMOVED: firebase/auth imports
         import { 
             getDatabase, 
             ref, 
             set, 
             update, 
+            push,
             onValue, 
+            onChildAdded,
+            remove,
             onDisconnect,
             serverTimestamp 
         } from 'firebase/database';
@@ -68,12 +69,11 @@
         };
 
         const app = initializeApp(firebaseConfig);
-        // REMOVED: const auth = getAuth(app);
         const db = getDatabase(app);
 
         // --- Main App Component ---
         function App() {
-            const [userId, setUserId] = useState(null); // Local ID
+            const [userId, setUserId] = useState(null);
             const [powerOn, setPowerOn] = useState(false);
             const [currentChannel, setCurrentChannel] = useState('01');
             const [isTransmitting, setIsTransmitting] = useState(false);
@@ -84,31 +84,29 @@
             
             const canvasRef = useRef(null);
             const requestRef = useRef(null);
+            const mediaRecorderRef = useRef(null);
+            const chunksRef = useRef([]);
 
-            // --- Setup User ID (No Auth) ---
+            // --- Setup User ID ---
             useEffect(() => {
-                // Generate a random ID locally since we aren't using Firebase Auth
                 let storedId = localStorage.getItem('walkie_user_id');
                 if (!storedId) {
                     storedId = 'user_' + Math.random().toString(36).substr(2, 9);
                     localStorage.setItem('walkie_user_id', storedId);
                 }
                 setUserId(storedId);
-                
-                // Set display name
                 const randomNum = Math.floor(Math.random() * 1000);
                 setUserName(`អ្នកប្រើប្រាស់ ${randomNum}`);
             }, []);
 
-            // --- Realtime Database Listener ---
+            // --- Incoming Status Listener ---
             useEffect(() => {
                 if (!userId || !powerOn) return;
 
-                const channelRef = ref(db, `channels/channel_${currentChannel}`);
-
-                const unsubscribe = onValue(channelRef, (snapshot) => {
+                const statusRef = ref(db, `channels/channel_${currentChannel}/status`);
+                
+                const unsubscribe = onValue(statusRef, (snapshot) => {
                     const data = snapshot.val();
-                    
                     if (data && data.isActive && data.userId !== userId) {
                         const now = Date.now();
                         const lastActive = data.timestamp || 0;
@@ -124,14 +122,32 @@
                     } else {
                         setIncomingTransmission(null);
                     }
-                }, (error) => {
-                    console.error("Database listener error:", error);
                 });
 
                 return () => unsubscribe();
             }, [userId, powerOn, currentChannel]);
 
-            // --- Audio Context & Visualizer Setup ---
+            // --- Audio Data Listener (RECEIVER) ---
+            useEffect(() => {
+                if (!userId || !powerOn) return;
+
+                // Path for audio data chunks
+                const audioRef = ref(db, `channels/channel_${currentChannel}/audio_chunks`);
+                
+                // Listen for new audio chunks added
+                const unsubscribe = onChildAdded(audioRef, (snapshot) => {
+                    const data = snapshot.val();
+                    if (data && data.userId !== userId && data.audioData) {
+                        playAudioChunk(data.audioData);
+                    }
+                });
+
+                return () => {
+                    unsubscribe();
+                };
+            }, [userId, powerOn, currentChannel]);
+
+            // --- Audio Context Setup ---
             useEffect(() => {
                 if (powerOn && !audioContext) {
                     const ctx = new (window.AudioContext || window.webkitAudioContext)();
@@ -146,7 +162,17 @@
                 }
             }, [powerOn]);
 
-            // --- Animation Loop ---
+            // --- Helper: Play Audio Chunk ---
+            const playAudioChunk = (base64Data) => {
+                try {
+                    const audio = new Audio(base64Data);
+                    audio.play().catch(e => console.log("Auto-play prevented:", e));
+                } catch (err) {
+                    console.error("Error playing chunk:", err);
+                }
+            };
+
+            // --- Visualizer Animation ---
             const animate = () => {
                 if (!canvasRef.current || !analyser) return;
                 
@@ -157,7 +183,7 @@
 
                 analyser.getByteFrequencyData(dataArray);
 
-                ctx.fillStyle = '#1f2937'; // bg-gray-800
+                ctx.fillStyle = '#1f2937'; 
                 ctx.fillRect(0, 0, canvas.width, canvas.height);
 
                 const barWidth = (canvas.width / bufferLength) * 2.5;
@@ -193,31 +219,57 @@
                 return () => cancelAnimationFrame(requestRef.current);
             }, [isTransmitting, analyser]);
 
-            // --- Transmit Logic ---
+            // --- Transmit Logic (SENDER) ---
             const startTransmission = async () => {
                 if (!powerOn || !userId || incomingTransmission) return;
 
                 try {
                     const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                    
+                    // Connect to Visualizer
                     if (audioContext && analyser) {
                         const source = audioContext.createMediaStreamSource(stream);
                         source.connect(analyser);
                     }
 
+                    // Setup MediaRecorder for streaming
+                    const recorder = new MediaRecorder(stream);
+                    mediaRecorderRef.current = recorder;
+
+                    recorder.ondataavailable = async (e) => {
+                        if (e.data.size > 0) {
+                            const reader = new FileReader();
+                            reader.readAsDataURL(e.data);
+                            reader.onloadend = () => {
+                                const base64data = reader.result;
+                                // Push audio chunk to DB
+                                const audioRef = ref(db, `channels/channel_${currentChannel}/audio_chunks`);
+                                push(audioRef, {
+                                    userId: userId,
+                                    audioData: base64data,
+                                    timestamp: serverTimestamp()
+                                });
+                            };
+                        }
+                    };
+
+                    // Start recording chunks every 250ms
+                    recorder.start(250); 
                     setIsTransmitting(true);
                     
-                    const channelRef = ref(db, `channels/channel_${currentChannel}`);
-                    
-                    onDisconnect(channelRef).update({
-                        isActive: false
-                    });
-
-                    await set(channelRef, {
+                    // Update Status
+                    const statusRef = ref(db, `channels/channel_${currentChannel}/status`);
+                    onDisconnect(statusRef).update({ isActive: false });
+                    await set(statusRef, {
                         isActive: true,
                         userId: userId,
                         userName: userName,
                         timestamp: serverTimestamp()
                     });
+
+                    // Clear old audio chunks on start to avoid playing old history
+                    const audioRef = ref(db, `channels/channel_${currentChannel}/audio_chunks`);
+                    remove(audioRef);
 
                     playBeep(600, 0.1);
 
@@ -230,16 +282,24 @@
             const stopTransmission = async () => {
                 if (!isTransmitting) return;
 
+                // Stop Recorder
+                if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+                    mediaRecorderRef.current.stop();
+                    // Stop all tracks
+                    mediaRecorderRef.current.stream.getTracks().forEach(track => track.stop());
+                }
+
                 setIsTransmitting(false);
                 playBeep(400, 0.1);
 
-                const channelRef = ref(db, `channels/channel_${currentChannel}`);
+                // Update Status
+                const statusRef = ref(db, `channels/channel_${currentChannel}/status`);
+                onDisconnect(statusRef).cancel();
+                await update(statusRef, { isActive: false });
                 
-                onDisconnect(channelRef).cancel();
-
-                await update(channelRef, {
-                    isActive: false,
-                });
+                // Optional: Clear chunks after done to save DB space
+                // const audioRef = ref(db, `channels/channel_${currentChannel}/audio_chunks`);
+                // remove(audioRef);
             };
 
             // --- Helpers ---
