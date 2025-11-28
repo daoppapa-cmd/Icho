@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Khmer Walkie Talkie</title>
+    <title>Khmer Walkie Talkie (Realtime DB)</title>
     
     <!-- Tailwind CSS -->
     <script src="https://cdn.tailwindcss.com"></script>
@@ -20,7 +20,7 @@
         "lucide-react": "https://esm.sh/lucide-react@0.263.1",
         "firebase/app": "https://www.gstatic.com/firebasejs/11.0.2/firebase-app.js",
         "firebase/auth": "https://www.gstatic.com/firebasejs/11.0.2/firebase-auth.js",
-        "firebase/firestore": "https://www.gstatic.com/firebasejs/11.0.2/firebase-firestore.js"
+        "firebase/database": "https://www.gstatic.com/firebasejs/11.0.2/firebase-database.js"
       }
     }
     </script>
@@ -29,7 +29,7 @@
         body {
             background-color: #171717; /* neutral-900 */
             color: white;
-            font-family: 'Noto Sans Khmer', sans-serif; /* Optional: Add Khmer font if available */
+            font-family: 'Noto Sans Khmer', sans-serif;
         }
         /* Hide scrollbar for cleaner look */
         ::-webkit-scrollbar {
@@ -51,30 +51,34 @@
             signInWithCustomToken 
         } from 'firebase/auth';
         import { 
-            getFirestore, 
-            collection, 
-            doc, 
-            setDoc, 
-            onSnapshot, 
+            getDatabase, 
+            ref, 
+            set, 
+            update, 
+            onValue, 
+            onDisconnect,
             serverTimestamp 
-        } from 'firebase/firestore';
+        } from 'firebase/database';
         import { Mic, Radio, Power, Users, Signal } from 'lucide-react';
 
         // --- Firebase Configuration ---
-        // Handle environment variables safely for standalone usage
-        const getFirebaseConfig = () => {
-            if (typeof __firebase_config !== 'undefined') {
-                return JSON.parse(__firebase_config);
-            }
-            // Placeholder: Replace with your actual config if running locally outside the immersive env
-            return { apiKey: "YOUR_API_KEY", projectId: "YOUR_PROJECT_ID" };
+        // Updated to include databaseURL for Realtime Database
+        const firebaseConfig = {
+            apiKey: "AIzaSyAcfDALTjrGiD_Te5DyFp7x-F6NrPwqEr4",
+            authDomain: "icho-7ddb4.firebaseapp.com",
+            // Assuming default RTDB instance based on project ID. 
+            // If this doesn't work, please verify the URL in your Firebase Console -> Realtime Database -> Data tab
+            databaseURL: "https://icho-7ddb4-default-rtdb.firebaseio.com", 
+            projectId: "icho-7ddb4",
+            storageBucket: "icho-7ddb4.firebasestorage.app",
+            messagingSenderId: "897027326100",
+            appId: "1:897027326100:web:a5d726c168a3fc01d23481",
+            measurementId: "G-0LPCL7ETRF"
         };
 
-        const firebaseConfig = getFirebaseConfig();
         const app = initializeApp(firebaseConfig);
         const auth = getAuth(app);
-        const db = getFirestore(app);
-        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        const db = getDatabase(app);
 
         // --- Main App Component ---
         function App() {
@@ -94,10 +98,14 @@
             // --- Auth & Setup ---
             useEffect(() => {
                 const initAuth = async () => {
-                    if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
-                        await signInWithCustomToken(auth, __initial_auth_token);
-                    } else {
-                        await signInAnonymously(auth);
+                    try {
+                        if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                            await signInWithCustomToken(auth, __initial_auth_token);
+                        } else {
+                            await signInAnonymously(auth);
+                        }
+                    } catch (error) {
+                        console.error("Auth error:", error);
                     }
                 };
                 initAuth();
@@ -112,33 +120,34 @@
                 return () => unsubscribe();
             }, []);
 
-            // --- Firestore Listener ---
+            // --- Realtime Database Listener ---
             useEffect(() => {
                 if (!user || !powerOn) return;
 
-                const channelDocRef = doc(db, 'artifacts', appId, 'public', 'data', 'channels', `channel_${currentChannel}`);
+                // Path: channels/channel_{currentChannel}
+                const channelRef = ref(db, `channels/channel_${currentChannel}`);
 
-                const unsubscribe = onSnapshot(channelDocRef, (docSnap) => {
-                    if (docSnap.exists()) {
-                        const data = docSnap.data();
-                        if (data.isActive && data.userId !== user.uid) {
-                            const now = Date.now();
-                            const lastActive = data.timestamp?.toMillis() || 0;
-                            
-                            if (now - lastActive < 5000) {
-                                setIncomingTransmission({
-                                    userId: data.userId,
-                                    userName: data.userName || 'Unknown'
-                                });
-                            } else {
-                                setIncomingTransmission(null);
-                            }
+                const unsubscribe = onValue(channelRef, (snapshot) => {
+                    const data = snapshot.val();
+                    
+                    if (data && data.isActive && data.userId !== user.uid) {
+                        const now = Date.now();
+                        // Realtime DB stores timestamp as number (milliseconds) directly when read back
+                        const lastActive = data.timestamp || 0;
+                        
+                        if (now - lastActive < 5000) {
+                            setIncomingTransmission({
+                                userId: data.userId,
+                                userName: data.userName || 'Unknown'
+                            });
                         } else {
                             setIncomingTransmission(null);
                         }
+                    } else {
+                        setIncomingTransmission(null);
                     }
                 }, (error) => {
-                    console.error("Firestore listener error:", error);
+                    console.error("Database listener error:", error);
                 });
 
                 return () => unsubscribe();
@@ -206,7 +215,7 @@
                 return () => cancelAnimationFrame(requestRef.current);
             }, [isTransmitting, analyser]);
 
-            // --- Transmit Logic ---
+            // --- Transmit Logic (Realtime DB) ---
             const startTransmission = async () => {
                 if (!powerOn || !user || incomingTransmission) return;
 
@@ -219,8 +228,16 @@
 
                     setIsTransmitting(true);
                     
-                    const channelRef = doc(db, 'artifacts', appId, 'public', 'data', 'channels', `channel_${currentChannel}`);
-                    await setDoc(channelRef, {
+                    const channelRef = ref(db, `channels/channel_${currentChannel}`);
+                    
+                    // Set OnDisconnect hook FIRST to ensure cleanup if internet drops while talking
+                    // This is a powerful feature of Realtime Database
+                    onDisconnect(channelRef).update({
+                        isActive: false
+                    });
+
+                    // Set status to active
+                    await set(channelRef, {
                         isActive: true,
                         userId: user.uid,
                         userName: userName,
@@ -231,8 +248,7 @@
 
                 } catch (err) {
                     console.error("Error accessing mic:", err);
-                    // Custom non-blocking alert using DOM if needed, using native alert for simplicity in index.html
-                    // but avoiding it per instructions if possible, though 'alert' is standard for permission errors
+                    alert("សូមអនុញ្ញាតឱ្យប្រើប្រាស់មីក្រូហ្វូនដើម្បីនិយាយ");
                 }
             };
 
@@ -242,13 +258,17 @@
                 setIsTransmitting(false);
                 playBeep(400, 0.1);
 
-                const channelRef = doc(db, 'artifacts', appId, 'public', 'data', 'channels', `channel_${currentChannel}`);
-                await setDoc(channelRef, {
+                const channelRef = ref(db, `channels/channel_${currentChannel}`);
+                
+                // Remove onDisconnect hook since we are closing normally
+                onDisconnect(channelRef).cancel();
+
+                // Update status to inactive
+                await update(channelRef, {
                     isActive: false,
-                    userId: null,
-                    userName: null,
-                    timestamp: serverTimestamp()
-                }, { merge: true });
+                    // We keep the last user info briefly, or just clear it. 
+                    // Setting isActive false is enough for the logic.
+                });
             };
 
             // --- Helpers ---
