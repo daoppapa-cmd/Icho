@@ -1,0 +1,445 @@
+<!DOCTYPE html>
+<html lang="km">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Khmer Walkie Talkie</title>
+    
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- Babel for JSX -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+    <!-- Import Map for Modules -->
+    <script type="importmap">
+    {
+      "imports": {
+        "react": "https://esm.sh/react@18.2.0",
+        "react-dom/client": "https://esm.sh/react-dom@18.2.0/client",
+        "lucide-react": "https://esm.sh/lucide-react@0.263.1",
+        "firebase/app": "https://www.gstatic.com/firebasejs/11.0.2/firebase-app.js",
+        "firebase/auth": "https://www.gstatic.com/firebasejs/11.0.2/firebase-auth.js",
+        "firebase/firestore": "https://www.gstatic.com/firebasejs/11.0.2/firebase-firestore.js"
+      }
+    }
+    </script>
+    
+    <style>
+        body {
+            background-color: #171717; /* neutral-900 */
+            color: white;
+            font-family: 'Noto Sans Khmer', sans-serif; /* Optional: Add Khmer font if available */
+        }
+        /* Hide scrollbar for cleaner look */
+        ::-webkit-scrollbar {
+            display: none;
+        }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel" data-type="module">
+        import React, { useState, useEffect, useRef } from 'react';
+        import { createRoot } from 'react-dom/client';
+        import { initializeApp } from 'firebase/app';
+        import { 
+            getAuth, 
+            signInAnonymously, 
+            onAuthStateChanged,
+            signInWithCustomToken 
+        } from 'firebase/auth';
+        import { 
+            getFirestore, 
+            collection, 
+            doc, 
+            setDoc, 
+            onSnapshot, 
+            serverTimestamp 
+        } from 'firebase/firestore';
+        import { Mic, Radio, Power, Users, Signal } from 'lucide-react';
+
+        // --- Firebase Configuration ---
+        // Handle environment variables safely for standalone usage
+        const getFirebaseConfig = () => {
+            if (typeof __firebase_config !== 'undefined') {
+                return JSON.parse(__firebase_config);
+            }
+            // Placeholder: Replace with your actual config if running locally outside the immersive env
+            return { apiKey: "YOUR_API_KEY", projectId: "YOUR_PROJECT_ID" };
+        };
+
+        const firebaseConfig = getFirebaseConfig();
+        const app = initializeApp(firebaseConfig);
+        const auth = getAuth(app);
+        const db = getFirestore(app);
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+
+        // --- Main App Component ---
+        function App() {
+            const [user, setUser] = useState(null);
+            const [powerOn, setPowerOn] = useState(false);
+            const [currentChannel, setCurrentChannel] = useState('01');
+            const [isTransmitting, setIsTransmitting] = useState(false);
+            const [incomingTransmission, setIncomingTransmission] = useState(null); 
+            const [audioContext, setAudioContext] = useState(null);
+            const [analyser, setAnalyser] = useState(null);
+            const [userName, setUserName] = useState('');
+            
+            // Canvas Ref for Visualizer
+            const canvasRef = useRef(null);
+            const requestRef = useRef(null);
+
+            // --- Auth & Setup ---
+            useEffect(() => {
+                const initAuth = async () => {
+                    if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                        await signInWithCustomToken(auth, __initial_auth_token);
+                    } else {
+                        await signInAnonymously(auth);
+                    }
+                };
+                initAuth();
+                
+                const unsubscribe = onAuthStateChanged(auth, (u) => {
+                    if (u) {
+                        setUser(u);
+                        const randomId = Math.floor(Math.random() * 1000);
+                        setUserName(`អ្នកប្រើប្រាស់ ${randomId}`);
+                    }
+                });
+                return () => unsubscribe();
+            }, []);
+
+            // --- Firestore Listener ---
+            useEffect(() => {
+                if (!user || !powerOn) return;
+
+                const channelDocRef = doc(db, 'artifacts', appId, 'public', 'data', 'channels', `channel_${currentChannel}`);
+
+                const unsubscribe = onSnapshot(channelDocRef, (docSnap) => {
+                    if (docSnap.exists()) {
+                        const data = docSnap.data();
+                        if (data.isActive && data.userId !== user.uid) {
+                            const now = Date.now();
+                            const lastActive = data.timestamp?.toMillis() || 0;
+                            
+                            if (now - lastActive < 5000) {
+                                setIncomingTransmission({
+                                    userId: data.userId,
+                                    userName: data.userName || 'Unknown'
+                                });
+                            } else {
+                                setIncomingTransmission(null);
+                            }
+                        } else {
+                            setIncomingTransmission(null);
+                        }
+                    }
+                }, (error) => {
+                    console.error("Firestore listener error:", error);
+                });
+
+                return () => unsubscribe();
+            }, [user, powerOn, currentChannel]);
+
+            // --- Audio Context & Visualizer Setup ---
+            useEffect(() => {
+                if (powerOn && !audioContext) {
+                    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+                    const anal = ctx.createAnalyser();
+                    anal.fftSize = 256;
+                    setAudioContext(ctx);
+                    setAnalyser(anal);
+                } else if (!powerOn && audioContext) {
+                    audioContext.close();
+                    setAudioContext(null);
+                    setAnalyser(null);
+                }
+            }, [powerOn]);
+
+            // --- Animation Loop ---
+            const animate = () => {
+                if (!canvasRef.current || !analyser) return;
+                
+                const canvas = canvasRef.current;
+                const ctx = canvas.getContext('2d');
+                const bufferLength = analyser.frequencyBinCount;
+                const dataArray = new Uint8Array(bufferLength);
+
+                analyser.getByteFrequencyData(dataArray);
+
+                ctx.fillStyle = '#1f2937'; // bg-gray-800
+                ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+                const barWidth = (canvas.width / bufferLength) * 2.5;
+                let barHeight;
+                let x = 0;
+
+                for (let i = 0; i < bufferLength; i++) {
+                    barHeight = dataArray[i] / 2;
+                    ctx.fillStyle = `rgb(50, ${barHeight + 100}, 50)`;
+                    ctx.fillRect(x, canvas.height - barHeight, barWidth, barHeight);
+                    x += barWidth + 1;
+                }
+
+                requestRef.current = requestAnimationFrame(animate);
+            };
+
+            useEffect(() => {
+                if (isTransmitting && analyser) {
+                    requestRef.current = requestAnimationFrame(animate);
+                } else {
+                    cancelAnimationFrame(requestRef.current);
+                    if (canvasRef.current) {
+                        const ctx = canvasRef.current.getContext('2d');
+                        ctx.fillStyle = '#1f2937';
+                        ctx.fillRect(0, 0, canvasRef.current.width, canvasRef.current.height);
+                        ctx.strokeStyle = '#374151';
+                        ctx.beginPath();
+                        ctx.moveTo(0, canvasRef.current.height / 2);
+                        ctx.lineTo(canvasRef.current.width, canvasRef.current.height / 2);
+                        ctx.stroke();
+                    }
+                }
+                return () => cancelAnimationFrame(requestRef.current);
+            }, [isTransmitting, analyser]);
+
+            // --- Transmit Logic ---
+            const startTransmission = async () => {
+                if (!powerOn || !user || incomingTransmission) return;
+
+                try {
+                    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                    if (audioContext && analyser) {
+                        const source = audioContext.createMediaStreamSource(stream);
+                        source.connect(analyser);
+                    }
+
+                    setIsTransmitting(true);
+                    
+                    const channelRef = doc(db, 'artifacts', appId, 'public', 'data', 'channels', `channel_${currentChannel}`);
+                    await setDoc(channelRef, {
+                        isActive: true,
+                        userId: user.uid,
+                        userName: userName,
+                        timestamp: serverTimestamp()
+                    });
+
+                    playBeep(600, 0.1);
+
+                } catch (err) {
+                    console.error("Error accessing mic:", err);
+                    // Custom non-blocking alert using DOM if needed, using native alert for simplicity in index.html
+                    // but avoiding it per instructions if possible, though 'alert' is standard for permission errors
+                }
+            };
+
+            const stopTransmission = async () => {
+                if (!isTransmitting) return;
+
+                setIsTransmitting(false);
+                playBeep(400, 0.1);
+
+                const channelRef = doc(db, 'artifacts', appId, 'public', 'data', 'channels', `channel_${currentChannel}`);
+                await setDoc(channelRef, {
+                    isActive: false,
+                    userId: null,
+                    userName: null,
+                    timestamp: serverTimestamp()
+                }, { merge: true });
+            };
+
+            // --- Helpers ---
+            const playBeep = (freq, duration) => {
+                if (!audioContext) return;
+                const osc = audioContext.createOscillator();
+                const gain = audioContext.createGain();
+                osc.connect(gain);
+                gain.connect(audioContext.destination);
+                osc.frequency.value = freq;
+                osc.type = 'square';
+                gain.gain.setValueAtTime(0.1, audioContext.currentTime);
+                osc.start();
+                osc.stop(audioContext.currentTime + duration);
+            };
+
+            const handleChannelChange = (delta) => {
+                if (!powerOn) return;
+                let newCh = parseInt(currentChannel) + delta;
+                if (newCh < 1) newCh = 1;
+                if (newCh > 99) newCh = 99;
+                setCurrentChannel(newCh.toString().padStart(2, '0'));
+                playBeep(800, 0.05);
+            };
+
+            const togglePower = () => {
+                if (!powerOn) {
+                    setPowerOn(true);
+                    setTimeout(() => playBeep(1000, 0.2), 500);
+                } else {
+                    setPowerOn(false);
+                    setIsTransmitting(false);
+                }
+            };
+
+            // --- Render ---
+            return (
+                <div className="min-h-screen bg-neutral-900 flex items-center justify-center p-4 font-sans select-none overflow-hidden">
+                    <div className="relative w-full max-w-sm bg-neutral-800 rounded-[3rem] shadow-2xl border-4 border-neutral-700 flex flex-col overflow-hidden">
+                        
+                        <div className="absolute -top-16 right-8 w-6 h-24 bg-neutral-700 rounded-t-lg border-2 border-neutral-600 z-0"></div>
+                        <div className="absolute -top-4 left-8 w-3 h-6 bg-red-600 rounded-sm z-0 animate-pulse"></div>
+
+                        <div className="mt-8 mx-auto w-3/4 grid grid-cols-6 gap-1 z-10 opacity-50">
+                        {[...Array(24)].map((_, i) => (
+                            <div key={i} className="w-1.5 h-1.5 bg-black rounded-full"></div>
+                        ))}
+                        </div>
+
+                        <div className="mx-6 mt-6 bg-[#9ea792] p-4 rounded-md shadow-inner border-4 border-neutral-600 relative overflow-hidden">
+                            <div className="absolute inset-0 bg-green-900 opacity-10 pointer-events-none grid grid-cols-12 gap-px"></div>
+                            
+                            {powerOn ? (
+                                <div className="relative z-10 flex flex-col h-32 justify-between">
+                                    <div className="flex justify-between items-center text-xs font-mono font-bold text-neutral-800">
+                                        <div className="flex items-center gap-1">
+                                            <Signal size={14} />
+                                            <span>RX/TX</span>
+                                        </div>
+                                        <div className="flex items-center gap-1">
+                                            <Users size={14} />
+                                            <span>CH {currentChannel}</span>
+                                        </div>
+                                    </div>
+
+                                    <div className="text-center">
+                                        {isTransmitting ? (
+                                            <div className="text-red-700 font-bold text-lg animate-pulse flex flex-col items-center">
+                                                <span>TRANSMITTING</span>
+                                                <span className="text-sm">កំពុងនិយាយ...</span>
+                                            </div>
+                                        ) : incomingTransmission ? (
+                                            <div className="text-green-800 font-bold text-lg flex flex-col items-center">
+                                                <span>RECEIVING</span>
+                                                <span className="text-sm truncate max-w-full">{String(incomingTransmission.userName)}</span>
+                                            </div>
+                                        ) : (
+                                            <div className="text-neutral-600 text-lg font-mono">STANDBY</div>
+                                        )}
+                                    </div>
+
+                                    <div className="text-4xl font-black font-mono text-center tracking-widest text-neutral-800 opacity-80">
+                                        {currentChannel}
+                                    </div>
+                                </div>
+                            ) : (
+                                <div className="h-32 flex items-center justify-center text-neutral-400 font-mono text-sm opacity-50">
+                                    POWER OFF
+                                </div>
+                            )}
+                        </div>
+
+                        <div className="p-6 flex flex-col gap-6 z-10 bg-neutral-800">
+                            
+                            <div className="h-16 bg-gray-900 rounded-lg border border-gray-700 overflow-hidden relative shadow-inner">
+                                <canvas 
+                                    ref={canvasRef} 
+                                    width="300" 
+                                    height="64" 
+                                    className="w-full h-full opacity-80"
+                                />
+                                <div className="absolute top-1 left-2 text-[10px] text-green-500 font-mono">AUDIO LEVEL</div>
+                            </div>
+
+                            <div className="flex justify-between items-center px-2">
+                                <button 
+                                    onClick={togglePower}
+                                    className={`p-4 rounded-full border-b-4 active:border-b-0 active:translate-y-1 transition-all ${powerOn ? 'bg-green-600 border-green-800 text-white shadow-[0_0_15px_rgba(34,197,94,0.5)]' : 'bg-red-600 border-red-800 text-white'}`}
+                                >
+                                    <Power size={24} />
+                                </button>
+
+                                <div className="flex flex-col items-center gap-2 bg-neutral-900 p-2 rounded-xl border border-neutral-700">
+                                    <span className="text-[10px] text-gray-400 uppercase tracking-wider">Channel</span>
+                                    <div className="flex items-center gap-3">
+                                        <button 
+                                            disabled={!powerOn}
+                                            onClick={() => handleChannelChange(-1)}
+                                            className="w-10 h-10 bg-neutral-700 rounded-lg flex items-center justify-center active:bg-neutral-600 disabled:opacity-50 text-white"
+                                        >
+                                            -
+                                        </button>
+                                        <span className="text-green-500 font-mono text-xl w-6 text-center">{currentChannel}</span>
+                                        <button 
+                                            disabled={!powerOn}
+                                            onClick={() => handleChannelChange(1)}
+                                            className="w-10 h-10 bg-neutral-700 rounded-lg flex items-center justify-center active:bg-neutral-600 disabled:opacity-50 text-white"
+                                        >
+                                            +
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div className="relative group">
+                                <button
+                                    disabled={!powerOn}
+                                    onMouseDown={startTransmission}
+                                    onMouseUp={stopTransmission}
+                                    onTouchStart={(e) => { e.preventDefault(); startTransmission(); }}
+                                    onTouchEnd={(e) => { e.preventDefault(); stopTransmission(); }}
+                                    className={`
+                                        w-full py-8 rounded-2xl font-bold text-xl tracking-widest text-white shadow-lg transition-all
+                                        border-b-8 active:border-b-0 active:translate-y-2
+                                        flex items-center justify-center gap-3
+                                        ${powerOn 
+                                        ? 'bg-orange-600 border-orange-800 hover:bg-orange-500 cursor-pointer' 
+                                        : 'bg-neutral-600 border-neutral-700 cursor-not-allowed opacity-50'}
+                                    `}
+                                >
+                                    <Mic className={`${isTransmitting ? 'animate-pulse' : ''}`} />
+                                    <span>{isTransmitting ? 'TRANSMITTING' : 'PUSH TO TALK'}</span>
+                                </button>
+                                
+                                <div className="absolute inset-0 pointer-events-none opacity-10 bg-[url('https://www.transparenttextures.com/patterns/diagmonds-light.png')]"></div>
+                            </div>
+
+                            <div className="mt-2 text-center">
+                                {!user ? (
+                                    <p className="text-yellow-500 text-xs animate-pulse">Connecting to network...</p>
+                                ) : (
+                                    <div className="flex items-center justify-center gap-2 text-neutral-500 text-xs">
+                                        <Radio size={12} />
+                                        <span>ID: {userName}</span>
+                                    </div>
+                                )}
+                            </div>
+                        </div>
+
+                        <div className="absolute bottom-4 left-4 w-3 h-3 rounded-full bg-neutral-900 border border-neutral-600 flex items-center justify-center">
+                            <div className="w-full h-0.5 bg-neutral-700 rotate-45"></div>
+                        </div>
+                        <div className="absolute bottom-4 right-4 w-3 h-3 rounded-full bg-neutral-900 border border-neutral-600 flex items-center justify-center">
+                            <div className="w-full h-0.5 bg-neutral-700 rotate-45"></div>
+                        </div>
+                    </div>
+
+                    <div className="fixed bottom-4 flex flex-col items-center gap-1 text-neutral-500 text-xs">
+                        <p>ចុចប៊ូតុង <span className="text-orange-500 font-bold">PUSH TO TALK</span> ឲ្យជាប់ដើម្បីនិយាយ</p>
+                        <div className="flex items-center gap-1">
+                            <span>ត្រូវប្រាកដថាបានបើក</span>
+                            <Power size={12} className="text-green-500"/>
+                            <span>ជាមុនសិន</span>
+                        </div>
+                    </div>
+                </div>
+            );
+        }
+
+        const root = createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
