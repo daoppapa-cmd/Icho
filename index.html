@@ -60,6 +60,8 @@
             onChildAdded,
             remove,
             onDisconnect,
+            query,
+            limitToLast,
             serverTimestamp 
         } from 'firebase/database';
         import { Mic, Radio, Power, Users, Signal } from 'lucide-react';
@@ -80,8 +82,9 @@
         const db = getDatabase(app);
 
         // --- Constants ---
-        const SAMPLE_RATE = 11025; // Optimized for bandwidth/latency
+        const SAMPLE_RATE = 11025; // Target sample rate for bandwidth efficiency
         const BUFFER_SIZE = 4096;
+        const JITTER_BUFFER_MS = 150; // 150ms buffer for smooth playback
 
         // --- Main App Component ---
         function App() {
@@ -91,7 +94,7 @@
             const [isTransmitting, setIsTransmitting] = useState(false);
             const [incomingTransmission, setIncomingTransmission] = useState(null); 
             
-            // Audio Refs (No State for these to avoid re-renders during audio processing)
+            // Audio Refs
             const audioContextRef = useRef(null);
             const analyserRef = useRef(null);
             
@@ -100,7 +103,7 @@
             const canvasRef = useRef(null);
             const processorRef = useRef(null);
             const streamRef = useRef(null);
-            const requestRef = useRef(null); // Fixed: Added requestRef definition
+            const requestRef = useRef(null);
             
             // Audio Scheduling Refs
             const nextStartTimeRef = useRef(0);
@@ -145,19 +148,20 @@
                 return () => unsubscribe();
             }, [userId, powerOn, currentChannel]);
 
-            // --- Audio Data Listener (RECEIVER) ---
+            // --- Audio Data Listener (RECEIVER - RAW PCM) ---
             useEffect(() => {
                 if (!userId || !powerOn) return;
 
                 const audioRef = ref(db, `channels/channel_${currentChannel}/audio_stream`);
+                const recentQuery = query(audioRef, limitToLast(1)); // Only listen for new chunks
                 
-                const unsubscribe = onChildAdded(audioRef, (snapshot) => {
+                const unsubscribe = onChildAdded(recentQuery, (snapshot) => {
                     const data = snapshot.val();
                     
                     if (data && data.userId !== userId && data.pcmData) {
-                         // Only play recent audio
+                         // Only play very recent audio (within last 2 seconds)
                          const timeDiff = Date.now() - (data.timestamp || 0);
-                         if (timeDiff < 3000) {
+                         if (timeDiff < 2000) {
                              playPCMChunk(data.pcmData);
                          }
                     }
@@ -166,12 +170,13 @@
                 return () => unsubscribe();
             }, [userId, powerOn, currentChannel]);
 
-            // --- Helper: Play Raw PCM Chunk ---
+            // --- Helper: Play Raw PCM Chunk with Jitter Buffer ---
             const playPCMChunk = (base64Data) => {
                 const ctx = audioContextRef.current;
                 if (!ctx) return;
 
                 try {
+                    // 1. Decode Base64 to Int16Array
                     const binaryString = window.atob(base64Data);
                     const len = binaryString.length;
                     const bytes = new Uint8Array(len);
@@ -180,21 +185,28 @@
                     }
                     const int16Data = new Int16Array(bytes.buffer);
 
+                    // 2. Convert Int16 to Float32
                     const float32Data = new Float32Array(int16Data.length);
                     for (let i = 0; i < int16Data.length; i++) {
                         float32Data[i] = int16Data[i] / 32768.0;
                     }
 
+                    // 3. Create Audio Buffer
                     const buffer = ctx.createBuffer(1, float32Data.length, SAMPLE_RATE);
                     buffer.copyToChannel(float32Data, 0);
 
+                    // 4. Schedule Playback with Jitter Buffer
                     const source = ctx.createBufferSource();
                     source.buffer = buffer;
                     source.connect(ctx.destination);
 
                     const currentTime = ctx.currentTime;
+                    // Jitter Buffer Logic: If we are falling behind or just starting, 
+                    // add a small buffer (JITTER_BUFFER_MS) to smooth out network bumps.
+                    const bufferSec = JITTER_BUFFER_MS / 1000;
+                    
                     if (nextStartTimeRef.current < currentTime) {
-                        nextStartTimeRef.current = currentTime + 0.02; 
+                        nextStartTimeRef.current = currentTime + bufferSec; 
                     }
 
                     source.start(nextStartTimeRef.current);
@@ -271,11 +283,13 @@
                     }
 
                     // Request Mic only when PTT is pressed
+                    // Using standard constraints for voice
                     const stream = await navigator.mediaDevices.getUserMedia({ 
                         audio: {
                             echoCancellation: true,
                             noiseSuppression: true,
-                            autoGainControl: true
+                            autoGainControl: true,
+                            sampleRate: 48000 // Prefer high rate to avoid hardware resampling artifacts
                         } 
                     });
                     streamRef.current = stream;
@@ -299,16 +313,21 @@
 
                         const inputData = e.inputBuffer.getChannelData(0);
                         
-                        // Downsample
+                        // Accurate Downsample using float ratio
                         const inputRate = ctx.sampleRate;
-                        const ratio = Math.floor(inputRate / SAMPLE_RATE);
+                        const ratio = inputRate / SAMPLE_RATE;
                         
                         const downsampledLength = Math.ceil(inputData.length / ratio);
                         const int16Buffer = new Int16Array(downsampledLength);
                         
                         let offset = 0;
+                        // Use float index for precise resampling (Nearest Neighbor)
                         for (let i = 0; i < inputData.length; i += ratio) {
-                            let s = Math.max(-1, Math.min(1, inputData[i]));
+                            // Map index to integer for array access
+                            const idx = Math.floor(i);
+                            if (idx >= inputData.length) break;
+                            
+                            let s = Math.max(-1, Math.min(1, inputData[idx]));
                             int16Buffer[offset++] = s < 0 ? s * 0x8000 : s * 0x7FFF;
                         }
 
