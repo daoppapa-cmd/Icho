@@ -84,7 +84,7 @@
             limitToLast,
             serverTimestamp 
         } from 'firebase/database';
-        import { Mic, Radio, Power, Users, Signal, Lock, X, List, AlertCircle, CheckCircle, Phone } from 'lucide-react';
+        import { Mic, Radio, Power, Users, Signal, Lock, X, List, AlertCircle, CheckCircle, Phone, ArrowLeft } from 'lucide-react';
 
         // --- Firebase Configuration ---
         const firebaseConfig = {
@@ -351,8 +351,6 @@
                         playPCMChunk(data.pcmData);
 
                         // Auto-clear incoming status after a short delay (UI only)
-                        // In real PTT, status usually clears when stream stops, 
-                        // but here we use packet arrival to trigger UI briefly
                         setTimeout(() => {
                              setIncomingTransmission(prev => prev && prev.type === 'private' && prev.userId === data.senderId ? null : prev);
                         }, 500);
@@ -744,12 +742,23 @@
                         <div className={`mx-6 mt-6 p-4 rounded-md shadow-inner border-4 border-neutral-600 relative overflow-hidden transition-colors duration-500 ${isPrivate ? 'bg-purple-200' : 'bg-[#9ea792]'}`}>
                             <div className="absolute inset-0 bg-green-900 opacity-10 pointer-events-none grid grid-cols-12 gap-px"></div>
                             
+                            {/* Back Button for Private Mode */}
+                            {isPrivate && powerOn && (
+                                <button 
+                                    onClick={exitPrivateMode}
+                                    className="absolute top-2 left-2 p-1 text-purple-700 hover:bg-purple-300/50 rounded-full z-20 transition-colors"
+                                >
+                                    <ArrowLeft size={18} />
+                                </button>
+                            )}
+
                             {powerOn ? (
                                 <div className="relative z-10 flex flex-col h-32 justify-between">
                                     <div className="flex justify-between items-center text-xs font-mono font-bold text-neutral-800">
-                                        <div className="flex items-center gap-1 cursor-pointer hover:text-neutral-600" onClick={() => setShowUserList(true)}>
-                                            <Users size={14} />
-                                            <span>ON: {onlineUsers.length}</span>
+                                        {/* Hide User Count in Private Mode to make room for Back Button if needed, or adjust padding */}
+                                        <div className={`flex items-center gap-1 cursor-pointer hover:text-neutral-600 ${isPrivate ? 'ml-6' : ''}`} onClick={() => !isPrivate && setShowUserList(true)}>
+                                            {!isPrivate && <Users size={14} />}
+                                            {!isPrivate && <span>ON: {onlineUsers.length}</span>}
                                         </div>
                                         <div className="flex items-center gap-1">
                                             {isPrivate ? <Lock size={14} /> : <Signal size={14} />}
