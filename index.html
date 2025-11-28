@@ -29,9 +29,17 @@
             background-color: #171717;
             color: white;
             font-family: 'Noto Sans Khmer', sans-serif;
+            /* Prevent pull-to-refresh on mobile */
+            overscroll-behavior: none;
         }
         ::-webkit-scrollbar {
             display: none;
+        }
+        /* Disable text selection */
+        .no-select {
+            -webkit-touch-callout: none;
+            -webkit-user-select: none;
+            user-select: none;
         }
     </style>
 </head>
@@ -72,7 +80,7 @@
         const db = getDatabase(app);
 
         // --- Constants ---
-        const SAMPLE_RATE = 11025; // Low sample rate for "Walkie Talkie" vibe & low bandwidth
+        const SAMPLE_RATE = 11025; // Optimized for bandwidth/latency
         const BUFFER_SIZE = 4096;
 
         // --- Main App Component ---
@@ -82,18 +90,20 @@
             const [currentChannel, setCurrentChannel] = useState('01');
             const [isTransmitting, setIsTransmitting] = useState(false);
             const [incomingTransmission, setIncomingTransmission] = useState(null); 
-            const [audioContext, setAudioContext] = useState(null);
-            const [analyser, setAnalyser] = useState(null);
+            
+            // Audio Refs (No State for these to avoid re-renders during audio processing)
+            const audioContextRef = useRef(null);
+            const analyserRef = useRef(null);
+            
             const [userName, setUserName] = useState('');
             
             const canvasRef = useRef(null);
             const processorRef = useRef(null);
             const streamRef = useRef(null);
-            const requestRef = useRef(null); // Added missing ref
+            const requestRef = useRef(null); // Fixed: Added requestRef definition
             
             // Audio Scheduling Refs
             const nextStartTimeRef = useRef(0);
-            const audioContextRef = useRef(null);
 
             // --- Setup User ID ---
             useEffect(() => {
@@ -135,7 +145,7 @@
                 return () => unsubscribe();
             }, [userId, powerOn, currentChannel]);
 
-            // --- Audio Data Listener (RECEIVER - RAW PCM) ---
+            // --- Audio Data Listener (RECEIVER) ---
             useEffect(() => {
                 if (!userId || !powerOn) return;
 
@@ -145,7 +155,7 @@
                     const data = snapshot.val();
                     
                     if (data && data.userId !== userId && data.pcmData) {
-                         // Only play recent audio (within last 3 seconds) to avoid playing history
+                         // Only play recent audio
                          const timeDiff = Date.now() - (data.timestamp || 0);
                          if (timeDiff < 3000) {
                              playPCMChunk(data.pcmData);
@@ -156,43 +166,12 @@
                 return () => unsubscribe();
             }, [userId, powerOn, currentChannel]);
 
-            // --- Audio Context Lifecycle ---
-            useEffect(() => {
-                if (powerOn) {
-                    if (!audioContextRef.current) {
-                        const AudioContext = window.AudioContext || window.webkitAudioContext;
-                        // Use system sample rate, we will resample manually if needed
-                        const ctx = new AudioContext(); 
-                        audioContextRef.current = ctx;
-                        
-                        const anal = ctx.createAnalyser();
-                        anal.fftSize = 256;
-                        setAnalyser(anal);
-                        setAudioContext(ctx);
-                        
-                        nextStartTimeRef.current = ctx.currentTime;
-                    } else {
-                        if (audioContextRef.current.state === 'suspended') {
-                            audioContextRef.current.resume();
-                        }
-                    }
-                } else {
-                    if (audioContextRef.current) {
-                        audioContextRef.current.close();
-                        audioContextRef.current = null;
-                        setAudioContext(null);
-                        setAnalyser(null);
-                    }
-                }
-            }, [powerOn]);
-
             // --- Helper: Play Raw PCM Chunk ---
             const playPCMChunk = (base64Data) => {
                 const ctx = audioContextRef.current;
                 if (!ctx) return;
 
                 try {
-                    // 1. Decode Base64 to Int16Array
                     const binaryString = window.atob(base64Data);
                     const len = binaryString.length;
                     const bytes = new Uint8Array(len);
@@ -201,24 +180,19 @@
                     }
                     const int16Data = new Int16Array(bytes.buffer);
 
-                    // 2. Convert Int16 to Float32
                     const float32Data = new Float32Array(int16Data.length);
                     for (let i = 0; i < int16Data.length; i++) {
                         float32Data[i] = int16Data[i] / 32768.0;
                     }
 
-                    // 3. Create Audio Buffer
-                    // We assume data is sent at SAMPLE_RATE (11025)
                     const buffer = ctx.createBuffer(1, float32Data.length, SAMPLE_RATE);
                     buffer.copyToChannel(float32Data, 0);
 
-                    // 4. Schedule Playback (Gapless)
                     const source = ctx.createBufferSource();
                     source.buffer = buffer;
                     source.connect(ctx.destination);
 
                     const currentTime = ctx.currentTime;
-                    // If buffer ran dry, reset to current time + small buffer
                     if (nextStartTimeRef.current < currentTime) {
                         nextStartTimeRef.current = currentTime + 0.02; 
                     }
@@ -233,10 +207,12 @@
 
             // --- Visualizer Animation ---
             const animate = () => {
-                if (!canvasRef.current || !analyser) return;
+                if (!canvasRef.current || !analyserRef.current) return;
                 
                 const canvas = canvasRef.current;
                 const ctx = canvas.getContext('2d');
+                const analyser = analyserRef.current;
+                
                 const bufferLength = analyser.frequencyBinCount;
                 const dataArray = new Uint8Array(bufferLength);
 
@@ -260,10 +236,10 @@
             };
 
             useEffect(() => {
-                if (isTransmitting && analyser) {
+                if (isTransmitting && powerOn) {
                     requestRef.current = requestAnimationFrame(animate);
                 } else {
-                    cancelAnimationFrame(requestRef.current);
+                    if (requestRef.current) cancelAnimationFrame(requestRef.current);
                     if (canvasRef.current) {
                         const ctx = canvasRef.current.getContext('2d');
                         ctx.fillStyle = '#1f2937';
@@ -275,45 +251,55 @@
                         ctx.stroke();
                     }
                 }
-                return () => cancelAnimationFrame(requestRef.current);
-            }, [isTransmitting, analyser]);
+                return () => {
+                     if (requestRef.current) cancelAnimationFrame(requestRef.current);
+                };
+            }, [isTransmitting, powerOn]);
 
-            // --- Transmit Logic (SENDER - RAW PCM STREAMING) ---
-            const startTransmission = async () => {
+            // --- Transmit Logic (SENDER) ---
+            const startTransmission = async (e) => {
+                // Prevent default touch behavior (scrolling/selection)
+                if(e) e.preventDefault();
+                
                 if (!powerOn || !userId || incomingTransmission) return;
 
                 try {
                     const ctx = audioContextRef.current;
+                    // Ensure context is running (sometimes it suspends on mobile)
                     if (ctx && ctx.state === 'suspended') {
                         await ctx.resume();
                     }
 
-                    // Request mic
-                    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                    // Request Mic only when PTT is pressed
+                    const stream = await navigator.mediaDevices.getUserMedia({ 
+                        audio: {
+                            echoCancellation: true,
+                            noiseSuppression: true,
+                            autoGainControl: true
+                        } 
+                    });
                     streamRef.current = stream;
                     
                     const source = ctx.createMediaStreamSource(stream);
                     
                     // Connect to Visualizer
-                    if (analyser) {
-                        source.connect(analyser);
+                    if (analyserRef.current) {
+                        source.connect(analyserRef.current);
                     }
 
-                    // Use ScriptProcessor for raw data access (Works in all browsers)
-                    // Buffer size 2048 or 4096. 4096 @ 44.1k = ~92ms latency.
                     const processor = ctx.createScriptProcessor(4096, 1, 1);
                     processorRef.current = processor;
 
                     source.connect(processor);
-                    processor.connect(ctx.destination); // Needed for chrome to fire events, we mute it by not playing
+                    processor.connect(ctx.destination);
 
                     processor.onaudioprocess = (e) => {
-                        if (!isTransmitting) return; // Safety check
+                        // Double check we are still transmitting
+                        if (!streamRef.current) return;
 
                         const inputData = e.inputBuffer.getChannelData(0);
                         
-                        // Downsample to SAMPLE_RATE (11025) to save bandwidth
-                        // Simple decimation (skip samples)
+                        // Downsample
                         const inputRate = ctx.sampleRate;
                         const ratio = Math.floor(inputRate / SAMPLE_RATE);
                         
@@ -322,14 +308,10 @@
                         
                         let offset = 0;
                         for (let i = 0; i < inputData.length; i += ratio) {
-                            // Convert Float32 (-1.0 to 1.0) to Int16 (-32768 to 32767)
-                            // Clamp values
                             let s = Math.max(-1, Math.min(1, inputData[i]));
                             int16Buffer[offset++] = s < 0 ? s * 0x8000 : s * 0x7FFF;
                         }
 
-                        // Convert to Base64 String
-                        // Using a simple loop to avoid stack overflow with spread operator on large arrays
                         let binary = '';
                         const bytes = new Uint8Array(int16Buffer.buffer);
                         const len = bytes.byteLength;
@@ -338,7 +320,6 @@
                         }
                         const base64data = window.btoa(binary);
 
-                        // Push to Firebase
                         const audioRef = ref(db, `channels/channel_${currentChannel}/audio_stream`);
                         push(audioRef, {
                             userId: userId,
@@ -349,7 +330,6 @@
 
                     setIsTransmitting(true);
                     
-                    // Update Status
                     const statusRef = ref(db, `channels/channel_${currentChannel}/status`);
                     onDisconnect(statusRef).update({ isActive: false });
                     await set(statusRef, {
@@ -359,7 +339,7 @@
                         timestamp: serverTimestamp()
                     });
 
-                    // Clear old stream
+                    // Clear old stream to keep it clean
                     const audioRef = ref(db, `channels/channel_${currentChannel}/audio_stream`);
                     remove(audioRef);
 
@@ -367,22 +347,24 @@
 
                 } catch (err) {
                     console.error("Error accessing mic:", err);
-                    alert("សូមអនុញ្ញាតឱ្យប្រើប្រាស់មីក្រូហ្វូនដើម្បីនិយាយ");
+                    alert("សូមអនុញ្ញាតឱ្យប្រើប្រាស់មីក្រូហ្វូនដើម្បីនិយាយ (Please allow microphone)");
                     setIsTransmitting(false);
                 }
             };
 
-            const stopTransmission = async () => {
+            const stopTransmission = async (e) => {
+                if(e) e.preventDefault();
+                
                 if (!isTransmitting) return;
 
-                // Stop Processor
+                // Cleanup Processor
                 if (processorRef.current) {
                     processorRef.current.disconnect();
                     processorRef.current.onaudioprocess = null;
                     processorRef.current = null;
                 }
 
-                // Stop Stream
+                // Cleanup Stream (Microphone) - CRITICAL: This turns off the red dot
                 if (streamRef.current) {
                     streamRef.current.getTracks().forEach(track => track.stop());
                     streamRef.current = null;
@@ -401,15 +383,19 @@
                 const ctx = audioContextRef.current;
                 if (!ctx) return;
                 
-                const osc = ctx.createOscillator();
-                const gain = ctx.createGain();
-                osc.connect(gain);
-                gain.connect(ctx.destination);
-                osc.frequency.value = freq;
-                osc.type = 'square';
-                gain.gain.setValueAtTime(0.1, ctx.currentTime);
-                osc.start();
-                osc.stop(ctx.currentTime + duration);
+                try {
+                    const osc = ctx.createOscillator();
+                    const gain = ctx.createGain();
+                    osc.connect(gain);
+                    gain.connect(ctx.destination);
+                    osc.frequency.value = freq;
+                    osc.type = 'square';
+                    gain.gain.setValueAtTime(0.1, ctx.currentTime);
+                    osc.start();
+                    osc.stop(ctx.currentTime + duration);
+                } catch(e) {
+                    console.warn("Audio context not ready for beep");
+                }
             };
 
             const handleChannelChange = (delta) => {
@@ -421,11 +407,39 @@
                 playBeep(800, 0.05);
             };
 
-            const togglePower = async () => {
+            const togglePower = async (e) => {
+                e.stopPropagation(); // Stop event bubbling
+                
                 if (!powerOn) {
+                    // Initialize AudioContext HERE on direct user gesture
+                    if (!audioContextRef.current) {
+                        const AudioContext = window.AudioContext || window.webkitAudioContext;
+                        const ctx = new AudioContext();
+                        audioContextRef.current = ctx;
+                        
+                        const anal = ctx.createAnalyser();
+                        anal.fftSize = 256;
+                        analyserRef.current = anal;
+                        
+                        nextStartTimeRef.current = ctx.currentTime;
+                    } else if (audioContextRef.current.state === 'suspended') {
+                        await audioContextRef.current.resume();
+                    }
+                    
                     setPowerOn(true);
+                    // Play startup beep
                     setTimeout(() => playBeep(1000, 0.2), 500);
                 } else {
+                    // Cleanup everything on power off
+                    if (streamRef.current) {
+                        streamRef.current.getTracks().forEach(track => track.stop());
+                        streamRef.current = null;
+                    }
+                    if (processorRef.current) {
+                        processorRef.current.disconnect();
+                        processorRef.current = null;
+                    }
+                    
                     setPowerOn(false);
                     setIsTransmitting(false);
                 }
@@ -433,7 +447,7 @@
 
             // --- Render ---
             return (
-                <div className="min-h-screen bg-neutral-900 flex items-center justify-center p-4 font-sans select-none overflow-hidden">
+                <div className="min-h-screen bg-neutral-900 flex items-center justify-center p-4 font-sans no-select overflow-hidden touch-none">
                     <div className="relative w-full max-w-sm bg-neutral-800 rounded-[3rem] shadow-2xl border-4 border-neutral-700 flex flex-col overflow-hidden">
                         
                         <div className="absolute -top-16 right-8 w-6 h-24 bg-neutral-700 rounded-t-lg border-2 border-neutral-600 z-0"></div>
@@ -535,11 +549,12 @@
                                     disabled={!powerOn}
                                     onMouseDown={startTransmission}
                                     onMouseUp={stopTransmission}
-                                    onTouchStart={(e) => { e.preventDefault(); startTransmission(); }}
-                                    onTouchEnd={(e) => { e.preventDefault(); stopTransmission(); }}
+                                    onMouseLeave={stopTransmission}
+                                    onTouchStart={startTransmission}
+                                    onTouchEnd={stopTransmission}
                                     className={`
                                         w-full py-8 rounded-2xl font-bold text-xl tracking-widest text-white shadow-lg transition-all
-                                        border-b-8 active:border-b-0 active:translate-y-2
+                                        border-b-8 active:border-b-0 active:translate-y-2 select-none
                                         flex items-center justify-center gap-3
                                         ${powerOn 
                                         ? 'bg-orange-600 border-orange-800 hover:bg-orange-500 cursor-pointer' 
