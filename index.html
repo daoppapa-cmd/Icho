@@ -196,10 +196,10 @@
             const [powerOn, setPowerOn] = useState(false);
             const [currentChannel, setCurrentChannel] = useState('01');
             const [isTransmitting, setIsTransmitting] = useState(false);
-            const [incomingTransmission, setIncomingTransmission] = useState(null); // { userId, userName, type: 'public' | 'private' }
+            const [incomingTransmission, setIncomingTransmission] = useState(null); 
             
             // Private Mode State
-            const [privateTarget, setPrivateTarget] = useState(null); // { id, name } or null
+            const [privateTarget, setPrivateTarget] = useState(null); 
             
             // Users Data
             const [onlineUsers, setOnlineUsers] = useState([]);
@@ -295,7 +295,6 @@
                 const statusRef = ref(db, `channels/channel_${currentChannel}/status`);
                 const unsubscribe = onValue(statusRef, (snapshot) => {
                     const data = snapshot.val();
-                    // Public reception logic
                     if (data && data.isActive && data.userId !== userId) {
                         setIncomingTransmission({
                             userId: data.userId,
@@ -303,7 +302,6 @@
                             type: 'public'
                         });
                     } else {
-                        // Only clear if NOT receiving private
                         setIncomingTransmission(prev => prev && prev.type === 'private' ? prev : null);
                     }
                 });
@@ -332,7 +330,6 @@
             useEffect(() => {
                 if (!userId || !powerOn) return;
 
-                // Listen to MY private stream
                 const privateAudioRef = ref(db, `private_stream/${userId}`);
                 const recentQuery = query(privateAudioRef, limitToLast(1));
 
@@ -341,7 +338,6 @@
                     if (isTransmittingRef.current) return;
 
                     if (data && data.pcmData) {
-                        // Update UI to show incoming private call
                         setIncomingTransmission({
                             userId: data.senderId,
                             userName: data.senderName,
@@ -350,7 +346,6 @@
                         
                         playPCMChunk(data.pcmData);
 
-                        // Auto-clear incoming status after a short delay (UI only)
                         setTimeout(() => {
                              setIncomingTransmission(prev => prev && prev.type === 'private' && prev.userId === data.senderId ? null : prev);
                         }, 500);
@@ -456,7 +451,6 @@
             const startTransmission = async (e) => {
                 if(e) e.preventDefault();
                 
-                // Allow private transmission even if alone in public channel
                 if (!privateTarget && onlineUsers.length <= 1) {
                     showToast("គ្មានអ្នកផ្សេង Online ទេ។ សូមរង់ចាំ...", "error");
                     return;
@@ -519,9 +513,7 @@
                         }
                         const base64data = window.btoa(binary);
 
-                        // ROUTING LOGIC: Private vs Public
                         if (privateTarget) {
-                            // Push to Target's private stream
                             const privateRef = ref(db, `private_stream/${privateTarget.id}`);
                             push(privateRef, {
                                 senderId: userId,
@@ -530,7 +522,6 @@
                                 timestamp: serverTimestamp()
                             });
                         } else {
-                            // Push to Public Channel
                             const audioRef = ref(db, `channels/channel_${currentChannel}/audio_stream`);
                             push(audioRef, {
                                 userId: userId,
@@ -550,8 +541,6 @@
                             userId: userId,
                             userName: userName
                         });
-                        
-                        // Clean up old public stream
                         const audioRef = ref(db, `channels/channel_${currentChannel}/audio_stream`);
                         remove(audioRef);
                     }
@@ -610,7 +599,6 @@
 
             const handleChannelChange = (delta) => {
                 if (!powerOn) return;
-                // Disable channel change while in private mode
                 if (privateTarget) {
                     showToast("សូមចាកចេញពី Private Mode ជាមុនសិន", "error");
                     return;
@@ -653,7 +641,7 @@
                     setPowerOn(false);
                     isTransmittingRef.current = false;
                     setIsTransmitting(false);
-                    setPrivateTarget(null); // Reset private on power off
+                    setPrivateTarget(null);
                     showToast("បានបិទម៉ាស៊ីន (Power OFF)", "info");
                 }
             };
@@ -712,10 +700,8 @@
             return (
                 <div className="min-h-screen bg-neutral-900 flex items-center justify-center p-4 font-sans no-select overflow-hidden touch-none relative">
                     
-                    {/* Notifications */}
                     {notification && <Toast message={notification.message} type={notification.type} onClose={() => setNotification(null)} />}
 
-                    {/* User List Modal */}
                     {showUserList && (
                         <UserListModal 
                             users={onlineUsers} 
@@ -727,36 +713,34 @@
 
                     <div className={`relative w-full max-w-sm bg-neutral-800 rounded-[3rem] shadow-2xl border-4 ${isPrivate ? 'border-purple-600' : 'border-neutral-700'} flex flex-col overflow-hidden transition-colors duration-500`}>
                         
-                        {/* Antenna */}
                         <div className="absolute -top-16 right-8 w-6 h-24 bg-neutral-700 rounded-t-lg border-2 border-neutral-600 z-0"></div>
                         <div className={`absolute -top-4 left-8 w-3 h-6 ${isPrivate ? 'bg-purple-600' : 'bg-red-600'} rounded-sm z-0 animate-pulse`}></div>
 
-                        {/* Speaker Grille */}
                         <div className="mt-8 mx-auto w-3/4 grid grid-cols-6 gap-1 z-10 opacity-50">
                         {[...Array(24)].map((_, i) => (
                             <div key={i} className="w-1.5 h-1.5 bg-black rounded-full"></div>
                         ))}
                         </div>
 
-                        {/* LCD Screen */}
                         <div className={`mx-6 mt-6 p-4 rounded-md shadow-inner border-4 border-neutral-600 relative overflow-hidden transition-colors duration-500 ${isPrivate ? 'bg-purple-200' : 'bg-[#9ea792]'}`}>
                             <div className="absolute inset-0 bg-green-900 opacity-10 pointer-events-none grid grid-cols-12 gap-px"></div>
                             
-                            {/* Back Button for Private Mode */}
+                            {/* Back Button for Private Mode - Larger and clearer */}
                             {isPrivate && powerOn && (
                                 <button 
                                     onClick={exitPrivateMode}
-                                    className="absolute top-2 left-2 p-1 text-purple-700 hover:bg-purple-300/50 rounded-full z-20 transition-colors"
+                                    className="absolute top-2 left-2 p-2 bg-purple-700/20 text-purple-800 hover:bg-purple-700/30 rounded-full z-20 transition-all active:scale-95 border border-purple-800/20"
+                                    aria-label="Back to Public Channel"
                                 >
-                                    <ArrowLeft size={18} />
+                                    <ArrowLeft size={24} strokeWidth={2.5} />
                                 </button>
                             )}
 
                             {powerOn ? (
                                 <div className="relative z-10 flex flex-col h-32 justify-between">
                                     <div className="flex justify-between items-center text-xs font-mono font-bold text-neutral-800">
-                                        {/* Hide User Count in Private Mode to make room for Back Button if needed, or adjust padding */}
-                                        <div className={`flex items-center gap-1 cursor-pointer hover:text-neutral-600 ${isPrivate ? 'ml-6' : ''}`} onClick={() => !isPrivate && setShowUserList(true)}>
+                                        {/* User Count / Back Button Area */}
+                                        <div className={`flex items-center gap-1 ${isPrivate ? 'invisible' : 'cursor-pointer hover:text-neutral-600'}`} onClick={() => !isPrivate && setShowUserList(true)}>
                                             {!isPrivate && <Users size={14} />}
                                             {!isPrivate && <span>ON: {onlineUsers.length}</span>}
                                         </div>
@@ -785,12 +769,7 @@
                                                         <div className="text-purple-600 text-sm font-bold flex items-center gap-1 mt-1">
                                                             <Lock size={12}/> {privateTarget.name}
                                                         </div>
-                                                        <button 
-                                                            onClick={exitPrivateMode}
-                                                            className="mt-2 text-[10px] bg-red-500/20 text-red-600 px-2 py-1 rounded hover:bg-red-500/30 font-bold"
-                                                        >
-                                                            [ EXIT PRIVATE ]
-                                                        </button>
+                                                        {/* Removed redundant button as per request */}
                                                     </>
                                                 ) : (
                                                     <>
