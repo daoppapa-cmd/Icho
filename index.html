@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Khmer Walkie Talkie (Final Fix)</title>
+    <title>Khmer Walkie Talkie (Final No Echo)</title>
     
     <!-- Tailwind CSS -->
     <script src="https://cdn.tailwindcss.com"></script>
@@ -80,8 +80,8 @@
         const db = getDatabase(app);
 
         // --- Constants ---
-        const SAMPLE_RATE = 11025; // Standard low-bandwidth rate
-        const JITTER_BUFFER_MS = 200; // Increased buffer for safety
+        const SAMPLE_RATE = 11025; 
+        const JITTER_BUFFER_MS = 150; 
 
         // --- Main App Component ---
         function App() {
@@ -94,6 +94,9 @@
             // Audio Refs
             const audioContextRef = useRef(null);
             const analyserRef = useRef(null);
+            
+            // Ref for instant state access inside callbacks
+            const isTransmittingRef = useRef(false);
             
             const [userName, setUserName] = useState('');
             
@@ -143,14 +146,16 @@
                 if (!userId || !powerOn) return;
 
                 const audioRef = ref(db, `channels/channel_${currentChannel}/audio_stream`);
-                // Listen to the last item added and subsequent ones
                 const recentQuery = query(audioRef, limitToLast(1)); 
                 
                 const unsubscribe = onChildAdded(recentQuery, (snapshot) => {
                     const data = snapshot.val();
                     
+                    // CRITICAL FIX: If we are transmitting, DO NOT PLAY anything. 
+                    // This enforces Half-Duplex and stops feedback loops.
+                    if (isTransmittingRef.current) return;
+
                     if (data && data.userId !== userId && data.pcmData) {
-                         // Removed strict timeDiff check to fix "no sound" issues on desynced clocks
                          playPCMChunk(data.pcmData);
                     }
                 });
@@ -163,7 +168,6 @@
                 const ctx = audioContextRef.current;
                 if (!ctx) return;
 
-                // Ensure context is running (critical for mobile)
                 if (ctx.state === 'suspended') {
                     try { await ctx.resume(); } catch(e) {}
                 }
@@ -196,7 +200,6 @@
                     const currentTime = ctx.currentTime;
                     const bufferSec = JITTER_BUFFER_MS / 1000;
                     
-                    // Reset scheduling if we fell behind (gap in audio)
                     if (nextStartTimeRef.current < currentTime) {
                         nextStartTimeRef.current = currentTime + bufferSec; 
                     }
@@ -272,12 +275,16 @@
                         await ctx.resume();
                     }
 
-                    // Request Mic
+                    // Strict Constraints for Voice
                     const stream = await navigator.mediaDevices.getUserMedia({ 
                         audio: {
                             echoCancellation: true,
                             noiseSuppression: true,
                             autoGainControl: true,
+                            googEchoCancellation: true,
+                            googAutoGainControl: true,
+                            googNoiseSuppression: true,
+                            googHighpassFilter: true
                         } 
                     });
                     streamRef.current = stream;
@@ -289,18 +296,16 @@
                         source.connect(analyserRef.current);
                     }
 
-                    // ScriptProcessor
                     const processor = ctx.createScriptProcessor(4096, 1, 1);
                     processorRef.current = processor;
 
-                    // IMPORTANT: Mute local feedback
-                    // Connect source -> processor -> gain(0) -> destination
-                    const zeroGain = ctx.createGain();
-                    zeroGain.gain.value = 0;
+                    // FIX: Connect to a dummy destination to keep processor alive
+                    // BUT prevent any audio from reaching the real destination.
+                    // This solves the "hearing yourself" problem completely.
+                    const dummyDest = ctx.createMediaStreamDestination();
                     
                     source.connect(processor);
-                    processor.connect(zeroGain);
-                    zeroGain.connect(ctx.destination);
+                    processor.connect(dummyDest); // Send output to nowhere/dummy
 
                     processor.onaudioprocess = (e) => {
                         if (!streamRef.current) return;
@@ -321,7 +326,6 @@
                             int16Buffer[offset++] = s < 0 ? s * 0x8000 : s * 0x7FFF;
                         }
 
-                        // Convert to Base64
                         let binary = '';
                         const bytes = new Uint8Array(int16Buffer.buffer);
                         const len = bytes.byteLength;
@@ -334,11 +338,12 @@
                         push(audioRef, {
                             userId: userId,
                             pcmData: base64data,
-                            // timestamp removed/ignored for logic
                         });
                     };
 
+                    // Sync State
                     setIsTransmitting(true);
+                    isTransmittingRef.current = true; // Set ref for immediate check in receiver
                     
                     const statusRef = ref(db, `channels/channel_${currentChannel}/status`);
                     onDisconnect(statusRef).update({ isActive: false });
@@ -358,6 +363,7 @@
                     console.error("Error accessing mic:", err);
                     alert("សូមអនុញ្ញាតឱ្យប្រើប្រាស់មីក្រូហ្វូន");
                     setIsTransmitting(false);
+                    isTransmittingRef.current = false;
                 }
             };
 
@@ -378,6 +384,7 @@
                 }
 
                 setIsTransmitting(false);
+                isTransmittingRef.current = false;
                 playBeep(400, 0.1);
 
                 const statusRef = ref(db, `channels/channel_${currentChannel}/status`);
@@ -441,6 +448,7 @@
                         processorRef.current = null;
                     }
                     setPowerOn(false);
+                    isTransmittingRef.current = false;
                     setIsTransmitting(false);
                 }
             };
