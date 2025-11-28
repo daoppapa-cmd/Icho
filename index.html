@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Khmer Walkie Talkie (Real Audio)</title>
+    <title>Khmer Walkie Talkie (Pro Audio)</title>
     
     <!-- Tailwind CSS -->
     <script src="https://cdn.tailwindcss.com"></script>
@@ -85,7 +85,12 @@
             const canvasRef = useRef(null);
             const requestRef = useRef(null);
             const mediaRecorderRef = useRef(null);
-            const chunksRef = useRef([]);
+            const recordingIntervalRef = useRef(null);
+            
+            // Audio Scheduling Refs
+            const nextStartTimeRef = useRef(0);
+            const audioContextRef = useRef(null);
+            const isPlayingRef = useRef(false);
 
             // --- Setup User ID ---
             useEffect(() => {
@@ -111,7 +116,7 @@
                         const now = Date.now();
                         const lastActive = data.timestamp || 0;
                         
-                        if (now - lastActive < 5000) {
+                        if (now - lastActive < 8000) {
                             setIncomingTransmission({
                                 userId: data.userId,
                                 userName: data.userName || 'Unknown'
@@ -131,44 +136,87 @@
             useEffect(() => {
                 if (!userId || !powerOn) return;
 
-                // Path for audio data chunks
                 const audioRef = ref(db, `channels/channel_${currentChannel}/audio_chunks`);
                 
-                // Listen for new audio chunks added
-                const unsubscribe = onChildAdded(audioRef, (snapshot) => {
+                const unsubscribe = onChildAdded(audioRef, async (snapshot) => {
                     const data = snapshot.val();
+                    
                     if (data && data.userId !== userId && data.audioData) {
-                        playAudioChunk(data.audioData);
+                         const timeDiff = Date.now() - (data.timestamp || 0);
+                         // Increase tolerance for slow networks
+                         if (timeDiff < 15000) {
+                             await scheduleAudioChunk(data.audioData);
+                         }
                     }
                 });
 
-                return () => {
-                    unsubscribe();
-                };
+                return () => unsubscribe();
             }, [userId, powerOn, currentChannel]);
 
-            // --- Audio Context Setup ---
+            // --- Audio Context Lifecycle ---
             useEffect(() => {
-                if (powerOn && !audioContext) {
-                    const ctx = new (window.AudioContext || window.webkitAudioContext)();
-                    const anal = ctx.createAnalyser();
-                    anal.fftSize = 256;
-                    setAudioContext(ctx);
-                    setAnalyser(anal);
-                } else if (!powerOn && audioContext) {
-                    audioContext.close();
-                    setAudioContext(null);
-                    setAnalyser(null);
+                if (powerOn) {
+                    if (!audioContextRef.current) {
+                        const AudioContext = window.AudioContext || window.webkitAudioContext;
+                        const ctx = new AudioContext();
+                        audioContextRef.current = ctx;
+                        
+                        const anal = ctx.createAnalyser();
+                        anal.fftSize = 256;
+                        setAnalyser(anal);
+                        setAudioContext(ctx);
+                        
+                        nextStartTimeRef.current = ctx.currentTime;
+                    } else {
+                        if (audioContextRef.current.state === 'suspended') {
+                            audioContextRef.current.resume();
+                        }
+                    }
+                } else {
+                    if (audioContextRef.current) {
+                        audioContextRef.current.close();
+                        audioContextRef.current = null;
+                        setAudioContext(null);
+                        setAnalyser(null);
+                    }
                 }
             }, [powerOn]);
 
-            // --- Helper: Play Audio Chunk ---
-            const playAudioChunk = (base64Data) => {
+            // --- Helper: Schedule Audio Chunk (Seamless Playback) ---
+            const scheduleAudioChunk = async (base64Data) => {
+                const ctx = audioContextRef.current;
+                if (!ctx) return;
+
                 try {
-                    const audio = new Audio(base64Data);
-                    audio.play().catch(e => console.log("Auto-play prevented:", e));
+                    // 1. Decode Base64
+                    const binaryString = window.atob(base64Data.split(',')[1]);
+                    const len = binaryString.length;
+                    const bytes = new Uint8Array(len);
+                    for (let i = 0; i < len; i++) {
+                        bytes[i] = binaryString.charCodeAt(i);
+                    }
+                    const arrayBuffer = bytes.buffer;
+
+                    // 2. Decode Audio Data (Now works because each chunk is a valid file)
+                    const audioBuffer = await ctx.decodeAudioData(arrayBuffer);
+
+                    // 3. Schedule Playback
+                    const source = ctx.createBufferSource();
+                    source.buffer = audioBuffer;
+                    source.connect(ctx.destination);
+
+                    // Ensure seamless playback
+                    const currentTime = ctx.currentTime;
+                    if (nextStartTimeRef.current < currentTime) {
+                        nextStartTimeRef.current = currentTime + 0.05; // Small buffer for network jitter
+                    }
+
+                    source.start(nextStartTimeRef.current);
+                    nextStartTimeRef.current += audioBuffer.duration;
+
                 } catch (err) {
-                    console.error("Error playing chunk:", err);
+                    console.error("Error decoding audio:", err);
+                    // If error persists, it usually means a corrupted chunk or codec mismatch
                 }
             };
 
@@ -219,42 +267,61 @@
                 return () => cancelAnimationFrame(requestRef.current);
             }, [isTransmitting, analyser]);
 
-            // --- Transmit Logic (SENDER) ---
-            const startTransmission = async () => {
-                if (!powerOn || !userId || incomingTransmission) return;
+            // --- Recording Loop Logic ---
+            const recordSegment = (stream) => {
+                if (!isTransmitting) return;
 
-                try {
-                    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-                    
-                    // Connect to Visualizer
-                    if (audioContext && analyser) {
-                        const source = audioContext.createMediaStreamSource(stream);
-                        source.connect(analyser);
-                    }
+                const options = { mimeType: 'audio/webm' }; 
+                // Using standard webm, usually safer for simple chunking than codec specific
+                
+                const recorder = new MediaRecorder(stream, options);
+                mediaRecorderRef.current = recorder;
 
-                    // Setup MediaRecorder for streaming
-                    const recorder = new MediaRecorder(stream);
-                    mediaRecorderRef.current = recorder;
-
-                    recorder.ondataavailable = async (e) => {
-                        if (e.data.size > 0) {
-                            const reader = new FileReader();
-                            reader.readAsDataURL(e.data);
-                            reader.onloadend = () => {
-                                const base64data = reader.result;
-                                // Push audio chunk to DB
+                recorder.ondataavailable = async (e) => {
+                    if (e.data.size > 0) {
+                        const reader = new FileReader();
+                        reader.readAsDataURL(e.data);
+                        reader.onloadend = () => {
+                            const base64data = reader.result;
+                            if (isTransmitting) { // Double check we are still transmitting
                                 const audioRef = ref(db, `channels/channel_${currentChannel}/audio_chunks`);
                                 push(audioRef, {
                                     userId: userId,
                                     audioData: base64data,
                                     timestamp: serverTimestamp()
                                 });
-                            };
-                        }
-                    };
+                            }
+                        };
+                    }
+                };
 
-                    // Start recording chunks every 250ms
-                    recorder.start(250); 
+                recorder.start();
+                // Stop and restart quickly to force a valid header on each chunk
+                setTimeout(() => {
+                    if (recorder.state === 'recording') {
+                        recorder.stop();
+                    }
+                }, 500); // 500ms chunks
+            };
+
+            // --- Transmit Logic (SENDER - Chunking Fix) ---
+            const startTransmission = async () => {
+                if (!powerOn || !userId || incomingTransmission) return;
+
+                try {
+                    const ctx = audioContextRef.current;
+                    if (ctx && ctx.state === 'suspended') {
+                        await ctx.resume();
+                    }
+
+                    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                    
+                    // Connect to Visualizer
+                    if (ctx && analyser) {
+                        const source = ctx.createMediaStreamSource(stream);
+                        source.connect(analyser);
+                    }
+
                     setIsTransmitting(true);
                     
                     // Update Status
@@ -267,53 +334,75 @@
                         timestamp: serverTimestamp()
                     });
 
-                    // Clear old audio chunks on start to avoid playing old history
+                    // Clear old audio chunks
                     const audioRef = ref(db, `channels/channel_${currentChannel}/audio_chunks`);
                     remove(audioRef);
+
+                    // Start Recording Loop
+                    // We need a loop that restarts the recorder every X ms
+                    // Using a recursive approach or interval
+                    let isActive = true;
+                    
+                    const loop = () => {
+                        if (!isActive) return;
+                        recordSegment(stream);
+                        // Schedule next segment slightly before previous ends to ensure overlap? 
+                        // Actually just sequential is fine for this method.
+                        setTimeout(loop, 550); // slight delay + buffer
+                    };
+                    
+                    // We need to attach this state to ref to stop it later
+                    recordingIntervalRef.current = { stop: () => { isActive = false; } };
+                    
+                    loop();
 
                     playBeep(600, 0.1);
 
                 } catch (err) {
                     console.error("Error accessing mic:", err);
                     alert("សូមអនុញ្ញាតឱ្យប្រើប្រាស់មីក្រូហ្វូនដើម្បីនិយាយ");
+                    setIsTransmitting(false);
                 }
             };
 
             const stopTransmission = async () => {
                 if (!isTransmitting) return;
 
-                // Stop Recorder
+                // Stop the loop
+                if (recordingIntervalRef.current) {
+                    recordingIntervalRef.current.stop();
+                    recordingIntervalRef.current = null;
+                }
+
+                // Stop current recorder if active
                 if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
                     mediaRecorderRef.current.stop();
-                    // Stop all tracks
+                    // Stop stream tracks
                     mediaRecorderRef.current.stream.getTracks().forEach(track => track.stop());
                 }
 
                 setIsTransmitting(false);
                 playBeep(400, 0.1);
 
-                // Update Status
                 const statusRef = ref(db, `channels/channel_${currentChannel}/status`);
                 onDisconnect(statusRef).cancel();
                 await update(statusRef, { isActive: false });
-                
-                // Optional: Clear chunks after done to save DB space
-                // const audioRef = ref(db, `channels/channel_${currentChannel}/audio_chunks`);
-                // remove(audioRef);
             };
 
             // --- Helpers ---
             const playBeep = (freq, duration) => {
-                if (!audioContext) return;
-                const osc = audioContext.createOscillator();
-                const gain = audioContext.createGain();
+                const ctx = audioContextRef.current;
+                if (!ctx) return;
+                
+                const osc = ctx.createOscillator();
+                const gain = ctx.createGain();
                 osc.connect(gain);
-                gain.connect(audioContext.destination);
+                gain.connect(ctx.destination);
                 osc.frequency.value = freq;
                 osc.type = 'square';
-                gain.gain.setValueAtTime(0.1, audioContext.currentTime);
+                gain.gain.setValueAtTime(0.1, ctx.currentTime);
                 osc.start();
-                osc.stop(audioContext.currentTime + duration);
+                osc.stop(ctx.currentTime + duration);
             };
 
             const handleChannelChange = (delta) => {
@@ -325,7 +414,7 @@
                 playBeep(800, 0.05);
             };
 
-            const togglePower = () => {
+            const togglePower = async () => {
                 if (!powerOn) {
                     setPowerOn(true);
                     setTimeout(() => playBeep(1000, 0.2), 500);
