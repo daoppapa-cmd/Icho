@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Khmer Walkie Talkie (Realtime DB)</title>
+    <title>Khmer Walkie Talkie (No Auth)</title>
     
     <!-- Tailwind CSS -->
     <script src="https://cdn.tailwindcss.com"></script>
@@ -19,7 +19,6 @@
         "react-dom/client": "https://esm.sh/react-dom@18.2.0/client",
         "lucide-react": "https://esm.sh/lucide-react@0.263.1",
         "firebase/app": "https://www.gstatic.com/firebasejs/11.0.2/firebase-app.js",
-        "firebase/auth": "https://www.gstatic.com/firebasejs/11.0.2/firebase-auth.js",
         "firebase/database": "https://www.gstatic.com/firebasejs/11.0.2/firebase-database.js"
       }
     }
@@ -44,12 +43,7 @@
         import React, { useState, useEffect, useRef } from 'react';
         import { createRoot } from 'react-dom/client';
         import { initializeApp } from 'firebase/app';
-        import { 
-            getAuth, 
-            signInAnonymously, 
-            onAuthStateChanged,
-            signInWithCustomToken 
-        } from 'firebase/auth';
+        // REMOVED: firebase/auth imports
         import { 
             getDatabase, 
             ref, 
@@ -62,12 +56,9 @@
         import { Mic, Radio, Power, Users, Signal } from 'lucide-react';
 
         // --- Firebase Configuration ---
-        // Updated to include databaseURL for Realtime Database
         const firebaseConfig = {
             apiKey: "AIzaSyAcfDALTjrGiD_Te5DyFp7x-F6NrPwqEr4",
             authDomain: "icho-7ddb4.firebaseapp.com",
-            // Assuming default RTDB instance based on project ID. 
-            // If this doesn't work, please verify the URL in your Firebase Console -> Realtime Database -> Data tab
             databaseURL: "https://icho-7ddb4-default-rtdb.firebaseio.com", 
             projectId: "icho-7ddb4",
             storageBucket: "icho-7ddb4.firebasestorage.app",
@@ -77,12 +68,12 @@
         };
 
         const app = initializeApp(firebaseConfig);
-        const auth = getAuth(app);
+        // REMOVED: const auth = getAuth(app);
         const db = getDatabase(app);
 
         // --- Main App Component ---
         function App() {
-            const [user, setUser] = useState(null);
+            const [userId, setUserId] = useState(null); // Local ID
             const [powerOn, setPowerOn] = useState(false);
             const [currentChannel, setCurrentChannel] = useState('01');
             const [isTransmitting, setIsTransmitting] = useState(false);
@@ -91,48 +82,35 @@
             const [analyser, setAnalyser] = useState(null);
             const [userName, setUserName] = useState('');
             
-            // Canvas Ref for Visualizer
             const canvasRef = useRef(null);
             const requestRef = useRef(null);
 
-            // --- Auth & Setup ---
+            // --- Setup User ID (No Auth) ---
             useEffect(() => {
-                const initAuth = async () => {
-                    try {
-                        if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
-                            await signInWithCustomToken(auth, __initial_auth_token);
-                        } else {
-                            await signInAnonymously(auth);
-                        }
-                    } catch (error) {
-                        console.error("Auth error:", error);
-                    }
-                };
-                initAuth();
+                // Generate a random ID locally since we aren't using Firebase Auth
+                let storedId = localStorage.getItem('walkie_user_id');
+                if (!storedId) {
+                    storedId = 'user_' + Math.random().toString(36).substr(2, 9);
+                    localStorage.setItem('walkie_user_id', storedId);
+                }
+                setUserId(storedId);
                 
-                const unsubscribe = onAuthStateChanged(auth, (u) => {
-                    if (u) {
-                        setUser(u);
-                        const randomId = Math.floor(Math.random() * 1000);
-                        setUserName(`អ្នកប្រើប្រាស់ ${randomId}`);
-                    }
-                });
-                return () => unsubscribe();
+                // Set display name
+                const randomNum = Math.floor(Math.random() * 1000);
+                setUserName(`អ្នកប្រើប្រាស់ ${randomNum}`);
             }, []);
 
             // --- Realtime Database Listener ---
             useEffect(() => {
-                if (!user || !powerOn) return;
+                if (!userId || !powerOn) return;
 
-                // Path: channels/channel_{currentChannel}
                 const channelRef = ref(db, `channels/channel_${currentChannel}`);
 
                 const unsubscribe = onValue(channelRef, (snapshot) => {
                     const data = snapshot.val();
                     
-                    if (data && data.isActive && data.userId !== user.uid) {
+                    if (data && data.isActive && data.userId !== userId) {
                         const now = Date.now();
-                        // Realtime DB stores timestamp as number (milliseconds) directly when read back
                         const lastActive = data.timestamp || 0;
                         
                         if (now - lastActive < 5000) {
@@ -151,7 +129,7 @@
                 });
 
                 return () => unsubscribe();
-            }, [user, powerOn, currentChannel]);
+            }, [userId, powerOn, currentChannel]);
 
             // --- Audio Context & Visualizer Setup ---
             useEffect(() => {
@@ -215,9 +193,9 @@
                 return () => cancelAnimationFrame(requestRef.current);
             }, [isTransmitting, analyser]);
 
-            // --- Transmit Logic (Realtime DB) ---
+            // --- Transmit Logic ---
             const startTransmission = async () => {
-                if (!powerOn || !user || incomingTransmission) return;
+                if (!powerOn || !userId || incomingTransmission) return;
 
                 try {
                     const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -230,16 +208,13 @@
                     
                     const channelRef = ref(db, `channels/channel_${currentChannel}`);
                     
-                    // Set OnDisconnect hook FIRST to ensure cleanup if internet drops while talking
-                    // This is a powerful feature of Realtime Database
                     onDisconnect(channelRef).update({
                         isActive: false
                     });
 
-                    // Set status to active
                     await set(channelRef, {
                         isActive: true,
-                        userId: user.uid,
+                        userId: userId,
                         userName: userName,
                         timestamp: serverTimestamp()
                     });
@@ -260,14 +235,10 @@
 
                 const channelRef = ref(db, `channels/channel_${currentChannel}`);
                 
-                // Remove onDisconnect hook since we are closing normally
                 onDisconnect(channelRef).cancel();
 
-                // Update status to inactive
                 await update(channelRef, {
                     isActive: false,
-                    // We keep the last user info briefly, or just clear it. 
-                    // Setting isActive false is enough for the logic.
                 });
             };
 
@@ -427,8 +398,8 @@
                             </div>
 
                             <div className="mt-2 text-center">
-                                {!user ? (
-                                    <p className="text-yellow-500 text-xs animate-pulse">Connecting to network...</p>
+                                {!userId ? (
+                                    <p className="text-yellow-500 text-xs animate-pulse">Initializing ID...</p>
                                 ) : (
                                     <div className="flex items-center justify-center gap-2 text-neutral-500 text-xs">
                                         <Radio size={12} />
