@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Khmer Walkie Talkie (Final No Echo)</title>
+    <title>Khmer Walkie Talkie (UI Upgrade)</title>
     
     <!-- Tailwind CSS -->
     <script src="https://cdn.tailwindcss.com"></script>
@@ -32,20 +32,34 @@
             overscroll-behavior: none;
         }
         ::-webkit-scrollbar {
-            display: none;
+            width: 6px;
+        }
+        ::-webkit-scrollbar-track {
+            background: #262626; 
+        }
+        ::-webkit-scrollbar-thumb {
+            background: #525252; 
+            border-radius: 3px;
         }
         .no-select {
             -webkit-touch-callout: none;
             -webkit-user-select: none;
             user-select: none;
         }
-        /* Modal Animation */
+        /* Animations */
+        @keyframes slideIn {
+            from { transform: translateY(-100%); opacity: 0; }
+            to { transform: translateY(0); opacity: 1; }
+        }
         @keyframes fadeIn {
             from { opacity: 0; transform: scale(0.95); }
             to { opacity: 1; transform: scale(1); }
         }
-        .modal-animate {
-            animation: fadeIn 0.3s ease-out forwards;
+        .toast-enter {
+            animation: slideIn 0.3s ease-out forwards;
+        }
+        .modal-enter {
+            animation: fadeIn 0.2s ease-out forwards;
         }
     </style>
 </head>
@@ -70,7 +84,7 @@
             limitToLast,
             serverTimestamp 
         } from 'firebase/database';
-        import { Mic, Radio, Power, Users, Signal, UserPlus, Lock } from 'lucide-react';
+        import { Mic, Radio, Power, Users, Signal, UserPlus, Lock, X, List, AlertCircle, CheckCircle } from 'lucide-react';
 
         // --- Firebase Configuration ---
         const firebaseConfig = {
@@ -91,6 +105,69 @@
         const SAMPLE_RATE = 11025; 
         const JITTER_BUFFER_MS = 150; 
 
+        // --- Toast Notification Component ---
+        const Toast = ({ message, type, onClose }) => {
+            useEffect(() => {
+                const timer = setTimeout(onClose, 3000);
+                return () => clearTimeout(timer);
+            }, [onClose]);
+
+            const bgClass = type === 'error' ? 'bg-red-600' : 'bg-green-600';
+            const icon = type === 'error' ? <AlertCircle size={20} /> : <CheckCircle size={20} />;
+
+            return (
+                <div className={`fixed top-4 left-1/2 -translate-x-1/2 z-50 flex items-center gap-3 px-6 py-3 rounded-full shadow-2xl text-white font-medium text-sm toast-enter ${bgClass}`}>
+                    {icon}
+                    <span>{message}</span>
+                </div>
+            );
+        };
+
+        // --- User List Modal Component ---
+        const UserListModal = ({ users, onClose, currentUserId }) => {
+            return (
+                <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4 modal-enter">
+                    <div className="bg-neutral-800 w-full max-w-sm rounded-3xl border border-neutral-700 shadow-2xl overflow-hidden flex flex-col max-h-[80vh]">
+                        {/* Header */}
+                        <div className="bg-neutral-900 p-4 flex justify-between items-center border-b border-neutral-700">
+                            <h3 className="text-white font-bold text-lg flex items-center gap-2">
+                                <Users size={20} className="text-green-500"/>
+                                អ្នកកំពុង Online ({users.length})
+                            </h3>
+                            <button onClick={onClose} className="p-2 bg-neutral-800 rounded-full hover:bg-neutral-700 transition-colors">
+                                <X size={18} className="text-gray-400" />
+                            </button>
+                        </div>
+                        
+                        {/* List */}
+                        <div className="overflow-y-auto p-2 flex-1 space-y-1">
+                            {users.length === 0 ? (
+                                <div className="text-center text-neutral-500 py-8">គ្មានអ្នកផ្សេង Online ទេ</div>
+                            ) : (
+                                users.map(user => (
+                                    <div key={user.id} className={`flex items-center gap-3 p-3 rounded-xl ${user.id === currentUserId ? 'bg-green-900/30 border border-green-800/50' : 'bg-neutral-700/30'}`}>
+                                        <div className="w-10 h-10 rounded-full bg-neutral-700 flex items-center justify-center text-lg font-bold text-neutral-300">
+                                            {user.name.charAt(0).toUpperCase()}
+                                        </div>
+                                        <div className="flex-1">
+                                            <div className="font-bold text-white text-sm flex items-center gap-2">
+                                                {user.name}
+                                                {user.id === currentUserId && <span className="text-[10px] bg-green-600 px-1.5 rounded text-white">Me</span>}
+                                            </div>
+                                            <div className="text-[10px] text-green-400 flex items-center gap-1">
+                                                <div className="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse"></div>
+                                                Online
+                                            </div>
+                                        </div>
+                                    </div>
+                                ))
+                            )}
+                        </div>
+                    </div>
+                </div>
+            );
+        };
+
         // --- Main App Component ---
         function App() {
             // User & System State
@@ -98,13 +175,17 @@
             const [userName, setUserName] = useState('');
             const [isNameSet, setIsNameSet] = useState(false);
             const [tempName, setTempName] = useState('');
+            const [notification, setNotification] = useState(null);
             
             // Walkie Talkie State
             const [powerOn, setPowerOn] = useState(false);
             const [currentChannel, setCurrentChannel] = useState('01');
             const [isTransmitting, setIsTransmitting] = useState(false);
             const [incomingTransmission, setIncomingTransmission] = useState(null); 
-            const [onlineCount, setOnlineCount] = useState(0);
+            
+            // Users Data
+            const [onlineUsers, setOnlineUsers] = useState([]); // Array of user objects
+            const [showUserList, setShowUserList] = useState(false);
 
             // Audio Refs
             const audioContextRef = useRef(null);
@@ -117,9 +198,13 @@
             const requestRef = useRef(null);
             const nextStartTimeRef = useRef(0);
 
+            // --- Helpers ---
+            const showToast = (msg, type = 'info') => {
+                setNotification({ message: msg, type });
+            };
+
             // --- 1. Initialization & Name Handling ---
             useEffect(() => {
-                // Check LocalStorage for ID
                 let storedId = localStorage.getItem('walkie_user_id');
                 if (!storedId) {
                     storedId = 'user_' + Math.random().toString(36).substr(2, 9);
@@ -127,7 +212,6 @@
                 }
                 setUserId(storedId);
 
-                // Check LocalStorage for Name
                 const storedName = localStorage.getItem('walkie_user_name');
                 if (storedName) {
                     setUserName(storedName);
@@ -149,27 +233,21 @@
             useEffect(() => {
                 if (!userId || !userName) return;
 
-                // Reference to this user's presence on the current channel
                 const userPresenceRef = ref(db, `channels/channel_${currentChannel}/users/${userId}`);
 
                 if (powerOn) {
-                    // Set Online
                     set(userPresenceRef, {
                         name: userName,
                         status: 'online',
                         lastSeen: serverTimestamp()
                     });
                     
-                    // Auto remove on disconnect (close browser/tab)
                     onDisconnect(userPresenceRef).remove();
                 } else {
-                    // Remove from list when Power Off
                     remove(userPresenceRef);
-                    // Cancel onDisconnect since we removed it manually
                     onDisconnect(userPresenceRef).cancel();
                 }
 
-                // Cleanup on unmount or channel change
                 return () => {
                     if (powerOn) {
                          remove(userPresenceRef);
@@ -177,18 +255,21 @@
                 };
             }, [powerOn, userId, userName, currentChannel]);
 
-            // --- 3. Active Users Listener ---
+            // --- 3. Active Users Listener (Fetch List) ---
             useEffect(() => {
                 const usersRef = ref(db, `channels/channel_${currentChannel}/users`);
                 
                 const unsubscribe = onValue(usersRef, (snapshot) => {
                     if (snapshot.exists()) {
-                        const users = snapshot.val();
-                        // Count how many users are in the list
-                        const count = Object.keys(users).length;
-                        setOnlineCount(count);
+                        const usersData = snapshot.val();
+                        // Convert object to array
+                        const usersList = Object.keys(usersData).map(key => ({
+                            id: key,
+                            ...usersData[key]
+                        }));
+                        setOnlineUsers(usersList);
                     } else {
-                        setOnlineCount(0);
+                        setOnlineUsers([]);
                     }
                 });
 
@@ -235,7 +316,7 @@
                 return () => unsubscribe();
             }, [userId, powerOn, currentChannel]);
 
-            // --- Audio Logic (Play & Record) ---
+            // --- Audio Logic ---
             const playPCMChunk = async (base64Data) => {
                 const ctx = audioContextRef.current;
                 if (!ctx) return;
@@ -331,10 +412,8 @@
             const startTransmission = async (e) => {
                 if(e) e.preventDefault();
                 
-                // --- Active User Check Constraint ---
-                // If only 1 user (me) is online, prevent transmission
-                if (onlineCount <= 1) {
-                    alert("គ្មានអ្នកផ្សេង Online ទេ។ សូមរង់ចាំ...");
+                if (onlineUsers.length <= 1) {
+                    showToast("គ្មានអ្នកផ្សេង Online ទេ។ សូមរង់ចាំ...", "error");
                     return;
                 }
                 
@@ -421,7 +500,7 @@
 
                 } catch (err) {
                     console.error("Error accessing mic:", err);
-                    alert("សូមអនុញ្ញាតឱ្យប្រើប្រាស់មីក្រូហ្វូន");
+                    showToast("សូមអនុញ្ញាតឱ្យប្រើប្រាស់មីក្រូហ្វូន", "error");
                     setIsTransmitting(false);
                     isTransmittingRef.current = false;
                 }
@@ -480,7 +559,6 @@
                 e.stopPropagation();
                 
                 if (!powerOn) {
-                    // Turn ON
                     if (!audioContextRef.current) {
                         const AudioContext = window.AudioContext || window.webkitAudioContext;
                         const ctx = new AudioContext();
@@ -495,8 +573,8 @@
                     
                     setPowerOn(true);
                     setTimeout(() => playBeep(1000, 0.2), 500);
+                    showToast("បានបើកម៉ាស៊ីន (Power ON)", "success");
                 } else {
-                    // Turn OFF
                     if (streamRef.current) {
                         streamRef.current.getTracks().forEach(track => track.stop());
                         streamRef.current = null;
@@ -508,7 +586,7 @@
                     setPowerOn(false);
                     isTransmittingRef.current = false;
                     setIsTransmitting(false);
-                    setOnlineCount(0); // Reset count view locally
+                    showToast("បានបិទម៉ាស៊ីន (Power OFF)", "info");
                 }
             };
 
@@ -549,10 +627,23 @@
             }
 
             // --- Render Main App ---
-            const isAlone = onlineCount <= 1;
+            const isAlone = onlineUsers.length <= 1;
 
             return (
-                <div className="min-h-screen bg-neutral-900 flex items-center justify-center p-4 font-sans no-select overflow-hidden touch-none">
+                <div className="min-h-screen bg-neutral-900 flex items-center justify-center p-4 font-sans no-select overflow-hidden touch-none relative">
+                    
+                    {/* Notifications */}
+                    {notification && <Toast message={notification.message} type={notification.type} onClose={() => setNotification(null)} />}
+
+                    {/* User List Modal */}
+                    {showUserList && (
+                        <UserListModal 
+                            users={onlineUsers} 
+                            currentUserId={userId} 
+                            onClose={() => setShowUserList(false)} 
+                        />
+                    )}
+
                     <div className="relative w-full max-w-sm bg-neutral-800 rounded-[3rem] shadow-2xl border-4 border-neutral-700 flex flex-col overflow-hidden">
                         
                         {/* Antenna */}
@@ -573,12 +664,12 @@
                             {powerOn ? (
                                 <div className="relative z-10 flex flex-col h-32 justify-between">
                                     <div className="flex justify-between items-center text-xs font-mono font-bold text-neutral-800">
-                                        <div className="flex items-center gap-1">
-                                            <Signal size={14} />
-                                            <span>ON: {onlineCount}</span>
+                                        <div className="flex items-center gap-1 cursor-pointer hover:text-neutral-600" onClick={() => setShowUserList(true)}>
+                                            <Users size={14} />
+                                            <span>ON: {onlineUsers.length}</span>
                                         </div>
                                         <div className="flex items-center gap-1">
-                                            <Users size={14} />
+                                            <Signal size={14} />
                                             <span>CH {currentChannel}</span>
                                         </div>
                                     </div>
@@ -692,10 +783,18 @@
                                 <div className="absolute inset-0 pointer-events-none opacity-10 bg-[url('https://www.transparenttextures.com/patterns/diagmonds-light.png')]"></div>
                             </div>
 
-                            <div className="mt-2 text-center">
-                                {isAlone && powerOn && (
+                            <div className="mt-2 text-center h-4">
+                                {isAlone && powerOn ? (
                                     <p className="text-yellow-500 text-xs animate-pulse">កំពុងរង់ចាំអ្នកផ្សេង Online...</p>
-                                )}
+                                ) : powerOn ? (
+                                    <button 
+                                        onClick={() => setShowUserList(true)}
+                                        className="text-xs text-neutral-500 hover:text-green-400 flex items-center justify-center gap-1 transition-colors"
+                                    >
+                                        <List size={12} />
+                                        <span>មើលអ្នក Online</span>
+                                    </button>
+                                ) : null}
                             </div>
                         </div>
 
