@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Khmer Walkie Talkie (Realtime PCM)</title>
+    <title>Khmer Walkie Talkie (Final Fix)</title>
     
     <!-- Tailwind CSS -->
     <script src="https://cdn.tailwindcss.com"></script>
@@ -29,13 +29,11 @@
             background-color: #171717;
             color: white;
             font-family: 'Noto Sans Khmer', sans-serif;
-            /* Prevent pull-to-refresh on mobile */
             overscroll-behavior: none;
         }
         ::-webkit-scrollbar {
             display: none;
         }
-        /* Disable text selection */
         .no-select {
             -webkit-touch-callout: none;
             -webkit-user-select: none;
@@ -82,9 +80,8 @@
         const db = getDatabase(app);
 
         // --- Constants ---
-        const SAMPLE_RATE = 11025; // Target sample rate for bandwidth efficiency
-        const BUFFER_SIZE = 4096;
-        const JITTER_BUFFER_MS = 150; // 150ms buffer for smooth playback
+        const SAMPLE_RATE = 11025; // Standard low-bandwidth rate
+        const JITTER_BUFFER_MS = 200; // Increased buffer for safety
 
         // --- Main App Component ---
         function App() {
@@ -129,17 +126,10 @@
                 const unsubscribe = onValue(statusRef, (snapshot) => {
                     const data = snapshot.val();
                     if (data && data.isActive && data.userId !== userId) {
-                        const now = Date.now();
-                        const lastActive = data.timestamp || 0;
-                        
-                        if (now - lastActive < 5000) {
-                            setIncomingTransmission({
-                                userId: data.userId,
-                                userName: data.userName || 'Unknown'
-                            });
-                        } else {
-                            setIncomingTransmission(null);
-                        }
+                        setIncomingTransmission({
+                            userId: data.userId,
+                            userName: data.userName || 'Unknown'
+                        });
                     } else {
                         setIncomingTransmission(null);
                     }
@@ -148,35 +138,38 @@
                 return () => unsubscribe();
             }, [userId, powerOn, currentChannel]);
 
-            // --- Audio Data Listener (RECEIVER - RAW PCM) ---
+            // --- Audio Data Listener (RECEIVER) ---
             useEffect(() => {
                 if (!userId || !powerOn) return;
 
                 const audioRef = ref(db, `channels/channel_${currentChannel}/audio_stream`);
-                const recentQuery = query(audioRef, limitToLast(1)); // Only listen for new chunks
+                // Listen to the last item added and subsequent ones
+                const recentQuery = query(audioRef, limitToLast(1)); 
                 
                 const unsubscribe = onChildAdded(recentQuery, (snapshot) => {
                     const data = snapshot.val();
                     
                     if (data && data.userId !== userId && data.pcmData) {
-                         // Only play very recent audio (within last 2 seconds)
-                         const timeDiff = Date.now() - (data.timestamp || 0);
-                         if (timeDiff < 2000) {
-                             playPCMChunk(data.pcmData);
-                         }
+                         // Removed strict timeDiff check to fix "no sound" issues on desynced clocks
+                         playPCMChunk(data.pcmData);
                     }
                 });
 
                 return () => unsubscribe();
             }, [userId, powerOn, currentChannel]);
 
-            // --- Helper: Play Raw PCM Chunk with Jitter Buffer ---
-            const playPCMChunk = (base64Data) => {
+            // --- Helper: Play Raw PCM Chunk ---
+            const playPCMChunk = async (base64Data) => {
                 const ctx = audioContextRef.current;
                 if (!ctx) return;
 
+                // Ensure context is running (critical for mobile)
+                if (ctx.state === 'suspended') {
+                    try { await ctx.resume(); } catch(e) {}
+                }
+
                 try {
-                    // 1. Decode Base64 to Int16Array
+                    // 1. Decode Base64
                     const binaryString = window.atob(base64Data);
                     const len = binaryString.length;
                     const bytes = new Uint8Array(len);
@@ -185,26 +178,25 @@
                     }
                     const int16Data = new Int16Array(bytes.buffer);
 
-                    // 2. Convert Int16 to Float32
+                    // 2. Convert to Float32
                     const float32Data = new Float32Array(int16Data.length);
                     for (let i = 0; i < int16Data.length; i++) {
                         float32Data[i] = int16Data[i] / 32768.0;
                     }
 
-                    // 3. Create Audio Buffer
+                    // 3. Create Buffer
                     const buffer = ctx.createBuffer(1, float32Data.length, SAMPLE_RATE);
                     buffer.copyToChannel(float32Data, 0);
 
-                    // 4. Schedule Playback with Jitter Buffer
+                    // 4. Schedule
                     const source = ctx.createBufferSource();
                     source.buffer = buffer;
                     source.connect(ctx.destination);
 
                     const currentTime = ctx.currentTime;
-                    // Jitter Buffer Logic: If we are falling behind or just starting, 
-                    // add a small buffer (JITTER_BUFFER_MS) to smooth out network bumps.
                     const bufferSec = JITTER_BUFFER_MS / 1000;
                     
+                    // Reset scheduling if we fell behind (gap in audio)
                     if (nextStartTimeRef.current < currentTime) {
                         nextStartTimeRef.current = currentTime + bufferSec; 
                     }
@@ -270,67 +262,66 @@
 
             // --- Transmit Logic (SENDER) ---
             const startTransmission = async (e) => {
-                // Prevent default touch behavior (scrolling/selection)
                 if(e) e.preventDefault();
                 
                 if (!powerOn || !userId || incomingTransmission) return;
 
                 try {
                     const ctx = audioContextRef.current;
-                    // Ensure context is running (sometimes it suspends on mobile)
                     if (ctx && ctx.state === 'suspended') {
                         await ctx.resume();
                     }
 
-                    // Request Mic only when PTT is pressed
-                    // Using standard constraints for voice
+                    // Request Mic
                     const stream = await navigator.mediaDevices.getUserMedia({ 
                         audio: {
                             echoCancellation: true,
                             noiseSuppression: true,
                             autoGainControl: true,
-                            sampleRate: 48000 // Prefer high rate to avoid hardware resampling artifacts
                         } 
                     });
                     streamRef.current = stream;
                     
                     const source = ctx.createMediaStreamSource(stream);
                     
-                    // Connect to Visualizer
+                    // Visualizer
                     if (analyserRef.current) {
                         source.connect(analyserRef.current);
                     }
 
+                    // ScriptProcessor
                     const processor = ctx.createScriptProcessor(4096, 1, 1);
                     processorRef.current = processor;
 
+                    // IMPORTANT: Mute local feedback
+                    // Connect source -> processor -> gain(0) -> destination
+                    const zeroGain = ctx.createGain();
+                    zeroGain.gain.value = 0;
+                    
                     source.connect(processor);
-                    processor.connect(ctx.destination);
+                    processor.connect(zeroGain);
+                    zeroGain.connect(ctx.destination);
 
                     processor.onaudioprocess = (e) => {
-                        // Double check we are still transmitting
                         if (!streamRef.current) return;
 
                         const inputData = e.inputBuffer.getChannelData(0);
                         
-                        // Accurate Downsample using float ratio
+                        // Downsample
                         const inputRate = ctx.sampleRate;
                         const ratio = inputRate / SAMPLE_RATE;
-                        
                         const downsampledLength = Math.ceil(inputData.length / ratio);
                         const int16Buffer = new Int16Array(downsampledLength);
                         
                         let offset = 0;
-                        // Use float index for precise resampling (Nearest Neighbor)
                         for (let i = 0; i < inputData.length; i += ratio) {
-                            // Map index to integer for array access
                             const idx = Math.floor(i);
                             if (idx >= inputData.length) break;
-                            
                             let s = Math.max(-1, Math.min(1, inputData[idx]));
                             int16Buffer[offset++] = s < 0 ? s * 0x8000 : s * 0x7FFF;
                         }
 
+                        // Convert to Base64
                         let binary = '';
                         const bytes = new Uint8Array(int16Buffer.buffer);
                         const len = bytes.byteLength;
@@ -343,7 +334,7 @@
                         push(audioRef, {
                             userId: userId,
                             pcmData: base64data,
-                            timestamp: serverTimestamp()
+                            // timestamp removed/ignored for logic
                         });
                     };
 
@@ -354,11 +345,10 @@
                     await set(statusRef, {
                         isActive: true,
                         userId: userId,
-                        userName: userName,
-                        timestamp: serverTimestamp()
+                        userName: userName
                     });
 
-                    // Clear old stream to keep it clean
+                    // Clear old stream
                     const audioRef = ref(db, `channels/channel_${currentChannel}/audio_stream`);
                     remove(audioRef);
 
@@ -366,7 +356,7 @@
 
                 } catch (err) {
                     console.error("Error accessing mic:", err);
-                    alert("សូមអនុញ្ញាតឱ្យប្រើប្រាស់មីក្រូហ្វូនដើម្បីនិយាយ (Please allow microphone)");
+                    alert("សូមអនុញ្ញាតឱ្យប្រើប្រាស់មីក្រូហ្វូន");
                     setIsTransmitting(false);
                 }
             };
@@ -376,14 +366,12 @@
                 
                 if (!isTransmitting) return;
 
-                // Cleanup Processor
                 if (processorRef.current) {
                     processorRef.current.disconnect();
                     processorRef.current.onaudioprocess = null;
                     processorRef.current = null;
                 }
 
-                // Cleanup Stream (Microphone) - CRITICAL: This turns off the red dot
                 if (streamRef.current) {
                     streamRef.current.getTracks().forEach(track => track.stop());
                     streamRef.current = null;
@@ -401,7 +389,6 @@
             const playBeep = (freq, duration) => {
                 const ctx = audioContextRef.current;
                 if (!ctx) return;
-                
                 try {
                     const osc = ctx.createOscillator();
                     const gain = ctx.createGain();
@@ -412,9 +399,7 @@
                     gain.gain.setValueAtTime(0.1, ctx.currentTime);
                     osc.start();
                     osc.stop(ctx.currentTime + duration);
-                } catch(e) {
-                    console.warn("Audio context not ready for beep");
-                }
+                } catch(e) {}
             };
 
             const handleChannelChange = (delta) => {
@@ -427,10 +412,9 @@
             };
 
             const togglePower = async (e) => {
-                e.stopPropagation(); // Stop event bubbling
+                e.stopPropagation();
                 
                 if (!powerOn) {
-                    // Initialize AudioContext HERE on direct user gesture
                     if (!audioContextRef.current) {
                         const AudioContext = window.AudioContext || window.webkitAudioContext;
                         const ctx = new AudioContext();
@@ -446,10 +430,8 @@
                     }
                     
                     setPowerOn(true);
-                    // Play startup beep
                     setTimeout(() => playBeep(1000, 0.2), 500);
                 } else {
-                    // Cleanup everything on power off
                     if (streamRef.current) {
                         streamRef.current.getTracks().forEach(track => track.stop());
                         streamRef.current = null;
@@ -458,7 +440,6 @@
                         processorRef.current.disconnect();
                         processorRef.current = null;
                     }
-                    
                     setPowerOn(false);
                     setIsTransmitting(false);
                 }
