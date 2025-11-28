@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Khmer Walkie Talkie (Pro Audio)</title>
+    <title>Khmer Walkie Talkie (Realtime PCM)</title>
     
     <!-- Tailwind CSS -->
     <script src="https://cdn.tailwindcss.com"></script>
@@ -71,6 +71,10 @@
         const app = initializeApp(firebaseConfig);
         const db = getDatabase(app);
 
+        // --- Constants ---
+        const SAMPLE_RATE = 11025; // Low sample rate for "Walkie Talkie" vibe & low bandwidth
+        const BUFFER_SIZE = 4096;
+
         // --- Main App Component ---
         function App() {
             const [userId, setUserId] = useState(null);
@@ -83,14 +87,13 @@
             const [userName, setUserName] = useState('');
             
             const canvasRef = useRef(null);
-            const requestRef = useRef(null);
-            const mediaRecorderRef = useRef(null);
-            const recordingIntervalRef = useRef(null);
+            const processorRef = useRef(null);
+            const streamRef = useRef(null);
+            const requestRef = useRef(null); // Added missing ref
             
             // Audio Scheduling Refs
             const nextStartTimeRef = useRef(0);
             const audioContextRef = useRef(null);
-            const isPlayingRef = useRef(false);
 
             // --- Setup User ID ---
             useEffect(() => {
@@ -116,7 +119,7 @@
                         const now = Date.now();
                         const lastActive = data.timestamp || 0;
                         
-                        if (now - lastActive < 8000) {
+                        if (now - lastActive < 5000) {
                             setIncomingTransmission({
                                 userId: data.userId,
                                 userName: data.userName || 'Unknown'
@@ -132,20 +135,20 @@
                 return () => unsubscribe();
             }, [userId, powerOn, currentChannel]);
 
-            // --- Audio Data Listener (RECEIVER) ---
+            // --- Audio Data Listener (RECEIVER - RAW PCM) ---
             useEffect(() => {
                 if (!userId || !powerOn) return;
 
-                const audioRef = ref(db, `channels/channel_${currentChannel}/audio_chunks`);
+                const audioRef = ref(db, `channels/channel_${currentChannel}/audio_stream`);
                 
-                const unsubscribe = onChildAdded(audioRef, async (snapshot) => {
+                const unsubscribe = onChildAdded(audioRef, (snapshot) => {
                     const data = snapshot.val();
                     
-                    if (data && data.userId !== userId && data.audioData) {
+                    if (data && data.userId !== userId && data.pcmData) {
+                         // Only play recent audio (within last 3 seconds) to avoid playing history
                          const timeDiff = Date.now() - (data.timestamp || 0);
-                         // Increase tolerance for slow networks
-                         if (timeDiff < 15000) {
-                             await scheduleAudioChunk(data.audioData);
+                         if (timeDiff < 3000) {
+                             playPCMChunk(data.pcmData);
                          }
                     }
                 });
@@ -158,7 +161,8 @@
                 if (powerOn) {
                     if (!audioContextRef.current) {
                         const AudioContext = window.AudioContext || window.webkitAudioContext;
-                        const ctx = new AudioContext();
+                        // Use system sample rate, we will resample manually if needed
+                        const ctx = new AudioContext(); 
                         audioContextRef.current = ctx;
                         
                         const anal = ctx.createAnalyser();
@@ -182,41 +186,48 @@
                 }
             }, [powerOn]);
 
-            // --- Helper: Schedule Audio Chunk (Seamless Playback) ---
-            const scheduleAudioChunk = async (base64Data) => {
+            // --- Helper: Play Raw PCM Chunk ---
+            const playPCMChunk = (base64Data) => {
                 const ctx = audioContextRef.current;
                 if (!ctx) return;
 
                 try {
-                    // 1. Decode Base64
-                    const binaryString = window.atob(base64Data.split(',')[1]);
+                    // 1. Decode Base64 to Int16Array
+                    const binaryString = window.atob(base64Data);
                     const len = binaryString.length;
                     const bytes = new Uint8Array(len);
                     for (let i = 0; i < len; i++) {
                         bytes[i] = binaryString.charCodeAt(i);
                     }
-                    const arrayBuffer = bytes.buffer;
+                    const int16Data = new Int16Array(bytes.buffer);
 
-                    // 2. Decode Audio Data (Now works because each chunk is a valid file)
-                    const audioBuffer = await ctx.decodeAudioData(arrayBuffer);
+                    // 2. Convert Int16 to Float32
+                    const float32Data = new Float32Array(int16Data.length);
+                    for (let i = 0; i < int16Data.length; i++) {
+                        float32Data[i] = int16Data[i] / 32768.0;
+                    }
 
-                    // 3. Schedule Playback
+                    // 3. Create Audio Buffer
+                    // We assume data is sent at SAMPLE_RATE (11025)
+                    const buffer = ctx.createBuffer(1, float32Data.length, SAMPLE_RATE);
+                    buffer.copyToChannel(float32Data, 0);
+
+                    // 4. Schedule Playback (Gapless)
                     const source = ctx.createBufferSource();
-                    source.buffer = audioBuffer;
+                    source.buffer = buffer;
                     source.connect(ctx.destination);
 
-                    // Ensure seamless playback
                     const currentTime = ctx.currentTime;
+                    // If buffer ran dry, reset to current time + small buffer
                     if (nextStartTimeRef.current < currentTime) {
-                        nextStartTimeRef.current = currentTime + 0.05; // Small buffer for network jitter
+                        nextStartTimeRef.current = currentTime + 0.02; 
                     }
 
                     source.start(nextStartTimeRef.current);
-                    nextStartTimeRef.current += audioBuffer.duration;
+                    nextStartTimeRef.current += buffer.duration;
 
                 } catch (err) {
-                    console.error("Error decoding audio:", err);
-                    // If error persists, it usually means a corrupted chunk or codec mismatch
+                    console.error("Error playing PCM:", err);
                 }
             };
 
@@ -267,44 +278,7 @@
                 return () => cancelAnimationFrame(requestRef.current);
             }, [isTransmitting, analyser]);
 
-            // --- Recording Loop Logic ---
-            const recordSegment = (stream) => {
-                if (!isTransmitting) return;
-
-                const options = { mimeType: 'audio/webm' }; 
-                // Using standard webm, usually safer for simple chunking than codec specific
-                
-                const recorder = new MediaRecorder(stream, options);
-                mediaRecorderRef.current = recorder;
-
-                recorder.ondataavailable = async (e) => {
-                    if (e.data.size > 0) {
-                        const reader = new FileReader();
-                        reader.readAsDataURL(e.data);
-                        reader.onloadend = () => {
-                            const base64data = reader.result;
-                            if (isTransmitting) { // Double check we are still transmitting
-                                const audioRef = ref(db, `channels/channel_${currentChannel}/audio_chunks`);
-                                push(audioRef, {
-                                    userId: userId,
-                                    audioData: base64data,
-                                    timestamp: serverTimestamp()
-                                });
-                            }
-                        };
-                    }
-                };
-
-                recorder.start();
-                // Stop and restart quickly to force a valid header on each chunk
-                setTimeout(() => {
-                    if (recorder.state === 'recording') {
-                        recorder.stop();
-                    }
-                }, 500); // 500ms chunks
-            };
-
-            // --- Transmit Logic (SENDER - Chunking Fix) ---
+            // --- Transmit Logic (SENDER - RAW PCM STREAMING) ---
             const startTransmission = async () => {
                 if (!powerOn || !userId || incomingTransmission) return;
 
@@ -314,13 +288,64 @@
                         await ctx.resume();
                     }
 
+                    // Request mic
                     const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                    streamRef.current = stream;
+                    
+                    const source = ctx.createMediaStreamSource(stream);
                     
                     // Connect to Visualizer
-                    if (ctx && analyser) {
-                        const source = ctx.createMediaStreamSource(stream);
+                    if (analyser) {
                         source.connect(analyser);
                     }
+
+                    // Use ScriptProcessor for raw data access (Works in all browsers)
+                    // Buffer size 2048 or 4096. 4096 @ 44.1k = ~92ms latency.
+                    const processor = ctx.createScriptProcessor(4096, 1, 1);
+                    processorRef.current = processor;
+
+                    source.connect(processor);
+                    processor.connect(ctx.destination); // Needed for chrome to fire events, we mute it by not playing
+
+                    processor.onaudioprocess = (e) => {
+                        if (!isTransmitting) return; // Safety check
+
+                        const inputData = e.inputBuffer.getChannelData(0);
+                        
+                        // Downsample to SAMPLE_RATE (11025) to save bandwidth
+                        // Simple decimation (skip samples)
+                        const inputRate = ctx.sampleRate;
+                        const ratio = Math.floor(inputRate / SAMPLE_RATE);
+                        
+                        const downsampledLength = Math.ceil(inputData.length / ratio);
+                        const int16Buffer = new Int16Array(downsampledLength);
+                        
+                        let offset = 0;
+                        for (let i = 0; i < inputData.length; i += ratio) {
+                            // Convert Float32 (-1.0 to 1.0) to Int16 (-32768 to 32767)
+                            // Clamp values
+                            let s = Math.max(-1, Math.min(1, inputData[i]));
+                            int16Buffer[offset++] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+                        }
+
+                        // Convert to Base64 String
+                        // Using a simple loop to avoid stack overflow with spread operator on large arrays
+                        let binary = '';
+                        const bytes = new Uint8Array(int16Buffer.buffer);
+                        const len = bytes.byteLength;
+                        for (let i = 0; i < len; i++) {
+                            binary += String.fromCharCode(bytes[i]);
+                        }
+                        const base64data = window.btoa(binary);
+
+                        // Push to Firebase
+                        const audioRef = ref(db, `channels/channel_${currentChannel}/audio_stream`);
+                        push(audioRef, {
+                            userId: userId,
+                            pcmData: base64data,
+                            timestamp: serverTimestamp()
+                        });
+                    };
 
                     setIsTransmitting(true);
                     
@@ -334,27 +359,9 @@
                         timestamp: serverTimestamp()
                     });
 
-                    // Clear old audio chunks
-                    const audioRef = ref(db, `channels/channel_${currentChannel}/audio_chunks`);
+                    // Clear old stream
+                    const audioRef = ref(db, `channels/channel_${currentChannel}/audio_stream`);
                     remove(audioRef);
-
-                    // Start Recording Loop
-                    // We need a loop that restarts the recorder every X ms
-                    // Using a recursive approach or interval
-                    let isActive = true;
-                    
-                    const loop = () => {
-                        if (!isActive) return;
-                        recordSegment(stream);
-                        // Schedule next segment slightly before previous ends to ensure overlap? 
-                        // Actually just sequential is fine for this method.
-                        setTimeout(loop, 550); // slight delay + buffer
-                    };
-                    
-                    // We need to attach this state to ref to stop it later
-                    recordingIntervalRef.current = { stop: () => { isActive = false; } };
-                    
-                    loop();
 
                     playBeep(600, 0.1);
 
@@ -368,17 +375,17 @@
             const stopTransmission = async () => {
                 if (!isTransmitting) return;
 
-                // Stop the loop
-                if (recordingIntervalRef.current) {
-                    recordingIntervalRef.current.stop();
-                    recordingIntervalRef.current = null;
+                // Stop Processor
+                if (processorRef.current) {
+                    processorRef.current.disconnect();
+                    processorRef.current.onaudioprocess = null;
+                    processorRef.current = null;
                 }
 
-                // Stop current recorder if active
-                if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
-                    mediaRecorderRef.current.stop();
-                    // Stop stream tracks
-                    mediaRecorderRef.current.stream.getTracks().forEach(track => track.stop());
+                // Stop Stream
+                if (streamRef.current) {
+                    streamRef.current.getTracks().forEach(track => track.stop());
+                    streamRef.current = null;
                 }
 
                 setIsTransmitting(false);
