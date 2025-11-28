@@ -39,6 +39,14 @@
             -webkit-user-select: none;
             user-select: none;
         }
+        /* Modal Animation */
+        @keyframes fadeIn {
+            from { opacity: 0; transform: scale(0.95); }
+            to { opacity: 1; transform: scale(1); }
+        }
+        .modal-animate {
+            animation: fadeIn 0.3s ease-out forwards;
+        }
     </style>
 </head>
 <body>
@@ -62,7 +70,7 @@
             limitToLast,
             serverTimestamp 
         } from 'firebase/database';
-        import { Mic, Radio, Power, Users, Signal } from 'lucide-react';
+        import { Mic, Radio, Power, Users, Signal, UserPlus, Lock } from 'lucide-react';
 
         // --- Firebase Configuration ---
         const firebaseConfig = {
@@ -85,42 +93,109 @@
 
         // --- Main App Component ---
         function App() {
+            // User & System State
             const [userId, setUserId] = useState(null);
+            const [userName, setUserName] = useState('');
+            const [isNameSet, setIsNameSet] = useState(false);
+            const [tempName, setTempName] = useState('');
+            
+            // Walkie Talkie State
             const [powerOn, setPowerOn] = useState(false);
             const [currentChannel, setCurrentChannel] = useState('01');
             const [isTransmitting, setIsTransmitting] = useState(false);
             const [incomingTransmission, setIncomingTransmission] = useState(null); 
-            
+            const [onlineCount, setOnlineCount] = useState(0);
+
             // Audio Refs
             const audioContextRef = useRef(null);
             const analyserRef = useRef(null);
-            
-            // Ref for instant state access inside callbacks
             const isTransmittingRef = useRef(false);
-            
-            const [userName, setUserName] = useState('');
             
             const canvasRef = useRef(null);
             const processorRef = useRef(null);
             const streamRef = useRef(null);
             const requestRef = useRef(null);
-            
-            // Audio Scheduling Refs
             const nextStartTimeRef = useRef(0);
 
-            // --- Setup User ID ---
+            // --- 1. Initialization & Name Handling ---
             useEffect(() => {
+                // Check LocalStorage for ID
                 let storedId = localStorage.getItem('walkie_user_id');
                 if (!storedId) {
                     storedId = 'user_' + Math.random().toString(36).substr(2, 9);
                     localStorage.setItem('walkie_user_id', storedId);
                 }
                 setUserId(storedId);
-                const randomNum = Math.floor(Math.random() * 1000);
-                setUserName(`អ្នកប្រើប្រាស់ ${randomNum}`);
+
+                // Check LocalStorage for Name
+                const storedName = localStorage.getItem('walkie_user_name');
+                if (storedName) {
+                    setUserName(storedName);
+                    setIsNameSet(true);
+                }
             }, []);
 
-            // --- Incoming Status Listener ---
+            const handleNameSubmit = (e) => {
+                e.preventDefault();
+                if (tempName.trim().length > 0) {
+                    const finalName = tempName.trim();
+                    localStorage.setItem('walkie_user_name', finalName);
+                    setUserName(finalName);
+                    setIsNameSet(true);
+                }
+            };
+
+            // --- 2. Presence System (Online/Offline) ---
+            useEffect(() => {
+                if (!userId || !userName) return;
+
+                // Reference to this user's presence on the current channel
+                const userPresenceRef = ref(db, `channels/channel_${currentChannel}/users/${userId}`);
+
+                if (powerOn) {
+                    // Set Online
+                    set(userPresenceRef, {
+                        name: userName,
+                        status: 'online',
+                        lastSeen: serverTimestamp()
+                    });
+                    
+                    // Auto remove on disconnect (close browser/tab)
+                    onDisconnect(userPresenceRef).remove();
+                } else {
+                    // Remove from list when Power Off
+                    remove(userPresenceRef);
+                    // Cancel onDisconnect since we removed it manually
+                    onDisconnect(userPresenceRef).cancel();
+                }
+
+                // Cleanup on unmount or channel change
+                return () => {
+                    if (powerOn) {
+                         remove(userPresenceRef);
+                    }
+                };
+            }, [powerOn, userId, userName, currentChannel]);
+
+            // --- 3. Active Users Listener ---
+            useEffect(() => {
+                const usersRef = ref(db, `channels/channel_${currentChannel}/users`);
+                
+                const unsubscribe = onValue(usersRef, (snapshot) => {
+                    if (snapshot.exists()) {
+                        const users = snapshot.val();
+                        // Count how many users are in the list
+                        const count = Object.keys(users).length;
+                        setOnlineCount(count);
+                    } else {
+                        setOnlineCount(0);
+                    }
+                });
+
+                return () => unsubscribe();
+            }, [currentChannel]);
+
+            // --- 4. Incoming Transmission Status Listener ---
             useEffect(() => {
                 if (!userId || !powerOn) return;
 
@@ -141,7 +216,7 @@
                 return () => unsubscribe();
             }, [userId, powerOn, currentChannel]);
 
-            // --- Audio Data Listener (RECEIVER) ---
+            // --- 5. Audio Data Listener ---
             useEffect(() => {
                 if (!userId || !powerOn) return;
 
@@ -150,9 +225,6 @@
                 
                 const unsubscribe = onChildAdded(recentQuery, (snapshot) => {
                     const data = snapshot.val();
-                    
-                    // CRITICAL FIX: If we are transmitting, DO NOT PLAY anything. 
-                    // This enforces Half-Duplex and stops feedback loops.
                     if (isTransmittingRef.current) return;
 
                     if (data && data.userId !== userId && data.pcmData) {
@@ -163,7 +235,7 @@
                 return () => unsubscribe();
             }, [userId, powerOn, currentChannel]);
 
-            // --- Helper: Play Raw PCM Chunk ---
+            // --- Audio Logic (Play & Record) ---
             const playPCMChunk = async (base64Data) => {
                 const ctx = audioContextRef.current;
                 if (!ctx) return;
@@ -173,7 +245,6 @@
                 }
 
                 try {
-                    // 1. Decode Base64
                     const binaryString = window.atob(base64Data);
                     const len = binaryString.length;
                     const bytes = new Uint8Array(len);
@@ -181,18 +252,14 @@
                         bytes[i] = binaryString.charCodeAt(i);
                     }
                     const int16Data = new Int16Array(bytes.buffer);
-
-                    // 2. Convert to Float32
                     const float32Data = new Float32Array(int16Data.length);
                     for (let i = 0; i < int16Data.length; i++) {
                         float32Data[i] = int16Data[i] / 32768.0;
                     }
 
-                    // 3. Create Buffer
                     const buffer = ctx.createBuffer(1, float32Data.length, SAMPLE_RATE);
                     buffer.copyToChannel(float32Data, 0);
 
-                    // 4. Schedule
                     const source = ctx.createBufferSource();
                     source.buffer = buffer;
                     source.connect(ctx.destination);
@@ -206,13 +273,11 @@
 
                     source.start(nextStartTimeRef.current);
                     nextStartTimeRef.current += buffer.duration;
-
                 } catch (err) {
                     console.error("Error playing PCM:", err);
                 }
             };
 
-            // --- Visualizer Animation ---
             const animate = () => {
                 if (!canvasRef.current || !analyserRef.current) return;
                 
@@ -263,9 +328,15 @@
                 };
             }, [isTransmitting, powerOn]);
 
-            // --- Transmit Logic (SENDER) ---
             const startTransmission = async (e) => {
                 if(e) e.preventDefault();
+                
+                // --- Active User Check Constraint ---
+                // If only 1 user (me) is online, prevent transmission
+                if (onlineCount <= 1) {
+                    alert("គ្មានអ្នកផ្សេង Online ទេ។ សូមរង់ចាំ...");
+                    return;
+                }
                 
                 if (!powerOn || !userId || incomingTransmission) return;
 
@@ -275,7 +346,6 @@
                         await ctx.resume();
                     }
 
-                    // Strict Constraints for Voice
                     const stream = await navigator.mediaDevices.getUserMedia({ 
                         audio: {
                             echoCancellation: true,
@@ -291,7 +361,6 @@
                     
                     const source = ctx.createMediaStreamSource(stream);
                     
-                    // Visualizer
                     if (analyserRef.current) {
                         source.connect(analyserRef.current);
                     }
@@ -299,20 +368,13 @@
                     const processor = ctx.createScriptProcessor(4096, 1, 1);
                     processorRef.current = processor;
 
-                    // FIX: Connect to a dummy destination to keep processor alive
-                    // BUT prevent any audio from reaching the real destination.
-                    // This solves the "hearing yourself" problem completely.
                     const dummyDest = ctx.createMediaStreamDestination();
-                    
                     source.connect(processor);
-                    processor.connect(dummyDest); // Send output to nowhere/dummy
+                    processor.connect(dummyDest); 
 
                     processor.onaudioprocess = (e) => {
                         if (!streamRef.current) return;
-
                         const inputData = e.inputBuffer.getChannelData(0);
-                        
-                        // Downsample
                         const inputRate = ctx.sampleRate;
                         const ratio = inputRate / SAMPLE_RATE;
                         const downsampledLength = Math.ceil(inputData.length / ratio);
@@ -341,9 +403,8 @@
                         });
                     };
 
-                    // Sync State
                     setIsTransmitting(true);
-                    isTransmittingRef.current = true; // Set ref for immediate check in receiver
+                    isTransmittingRef.current = true;
                     
                     const statusRef = ref(db, `channels/channel_${currentChannel}/status`);
                     onDisconnect(statusRef).update({ isActive: false });
@@ -353,7 +414,6 @@
                         userName: userName
                     });
 
-                    // Clear old stream
                     const audioRef = ref(db, `channels/channel_${currentChannel}/audio_stream`);
                     remove(audioRef);
 
@@ -369,7 +429,6 @@
 
             const stopTransmission = async (e) => {
                 if(e) e.preventDefault();
-                
                 if (!isTransmitting) return;
 
                 if (processorRef.current) {
@@ -392,7 +451,6 @@
                 await update(statusRef, { isActive: false });
             };
 
-            // --- Helpers ---
             const playBeep = (freq, duration) => {
                 const ctx = audioContextRef.current;
                 if (!ctx) return;
@@ -422,15 +480,14 @@
                 e.stopPropagation();
                 
                 if (!powerOn) {
+                    // Turn ON
                     if (!audioContextRef.current) {
                         const AudioContext = window.AudioContext || window.webkitAudioContext;
                         const ctx = new AudioContext();
                         audioContextRef.current = ctx;
-                        
                         const anal = ctx.createAnalyser();
                         anal.fftSize = 256;
                         analyserRef.current = anal;
-                        
                         nextStartTimeRef.current = ctx.currentTime;
                     } else if (audioContextRef.current.state === 'suspended') {
                         await audioContextRef.current.resume();
@@ -439,6 +496,7 @@
                     setPowerOn(true);
                     setTimeout(() => playBeep(1000, 0.2), 500);
                 } else {
+                    // Turn OFF
                     if (streamRef.current) {
                         streamRef.current.getTracks().forEach(track => track.stop());
                         streamRef.current = null;
@@ -450,23 +508,65 @@
                     setPowerOn(false);
                     isTransmittingRef.current = false;
                     setIsTransmitting(false);
+                    setOnlineCount(0); // Reset count view locally
                 }
             };
 
-            // --- Render ---
+            // --- UI: Name Input Modal ---
+            if (!isNameSet) {
+                return (
+                    <div className="min-h-screen bg-neutral-900 flex items-center justify-center p-4 font-sans text-white">
+                        <div className="bg-neutral-800 p-8 rounded-3xl border-2 border-neutral-700 w-full max-w-md modal-animate shadow-2xl">
+                            <div className="flex justify-center mb-6">
+                                <div className="p-4 bg-orange-600 rounded-full shadow-[0_0_20px_rgba(234,88,12,0.3)]">
+                                    <Radio size={48} className="text-white" />
+                                </div>
+                            </div>
+                            <h2 className="text-2xl font-bold text-center mb-2">បញ្ចូលឈ្មោះរបស់អ្នក</h2>
+                            <p className="text-center text-neutral-400 mb-6 text-sm">សូមដាក់ឈ្មោះដើម្បីឱ្យអ្នកផ្សេងស្គាល់ (Realtime Radio)</p>
+                            
+                            <form onSubmit={handleNameSubmit} className="flex flex-col gap-4">
+                                <input 
+                                    type="text" 
+                                    value={tempName}
+                                    onChange={(e) => setTempName(e.target.value)}
+                                    placeholder="ឈ្មោះរបស់អ្នក..."
+                                    className="p-4 rounded-xl bg-neutral-900 border border-neutral-700 text-white placeholder-neutral-500 focus:outline-none focus:border-orange-500 text-center text-lg"
+                                    autoFocus
+                                    maxLength={15}
+                                />
+                                <button 
+                                    type="submit" 
+                                    disabled={!tempName.trim()}
+                                    className="p-4 rounded-xl bg-orange-600 font-bold text-lg disabled:opacity-50 disabled:cursor-not-allowed hover:bg-orange-500 transition-colors shadow-lg"
+                                >
+                                    ចាប់ផ្តើម
+                                </button>
+                            </form>
+                        </div>
+                    </div>
+                );
+            }
+
+            // --- Render Main App ---
+            const isAlone = onlineCount <= 1;
+
             return (
                 <div className="min-h-screen bg-neutral-900 flex items-center justify-center p-4 font-sans no-select overflow-hidden touch-none">
                     <div className="relative w-full max-w-sm bg-neutral-800 rounded-[3rem] shadow-2xl border-4 border-neutral-700 flex flex-col overflow-hidden">
                         
+                        {/* Antenna */}
                         <div className="absolute -top-16 right-8 w-6 h-24 bg-neutral-700 rounded-t-lg border-2 border-neutral-600 z-0"></div>
                         <div className="absolute -top-4 left-8 w-3 h-6 bg-red-600 rounded-sm z-0 animate-pulse"></div>
 
+                        {/* Speaker Grille */}
                         <div className="mt-8 mx-auto w-3/4 grid grid-cols-6 gap-1 z-10 opacity-50">
                         {[...Array(24)].map((_, i) => (
                             <div key={i} className="w-1.5 h-1.5 bg-black rounded-full"></div>
                         ))}
                         </div>
 
+                        {/* LCD Screen */}
                         <div className="mx-6 mt-6 bg-[#9ea792] p-4 rounded-md shadow-inner border-4 border-neutral-600 relative overflow-hidden">
                             <div className="absolute inset-0 bg-green-900 opacity-10 pointer-events-none grid grid-cols-12 gap-px"></div>
                             
@@ -475,7 +575,7 @@
                                     <div className="flex justify-between items-center text-xs font-mono font-bold text-neutral-800">
                                         <div className="flex items-center gap-1">
                                             <Signal size={14} />
-                                            <span>RX/TX</span>
+                                            <span>ON: {onlineCount}</span>
                                         </div>
                                         <div className="flex items-center gap-1">
                                             <Users size={14} />
@@ -487,7 +587,7 @@
                                         {isTransmitting ? (
                                             <div className="text-red-700 font-bold text-lg animate-pulse flex flex-col items-center">
                                                 <span>TRANSMITTING</span>
-                                                <span className="text-sm">កំពុងនិយាយ...</span>
+                                                <span className="text-xs mt-1">{userName}</span>
                                             </div>
                                         ) : incomingTransmission ? (
                                             <div className="text-green-800 font-bold text-lg flex flex-col items-center">
@@ -495,7 +595,10 @@
                                                 <span className="text-sm truncate max-w-full">{String(incomingTransmission.userName)}</span>
                                             </div>
                                         ) : (
-                                            <div className="text-neutral-600 text-lg font-mono">STANDBY</div>
+                                            <div className="flex flex-col items-center">
+                                                <div className="text-neutral-600 text-lg font-mono">STANDBY</div>
+                                                <div className="text-neutral-500 text-xs mt-1 font-mono">{userName}</div>
+                                            </div>
                                         )}
                                     </div>
 
@@ -504,12 +607,14 @@
                                     </div>
                                 </div>
                             ) : (
-                                <div className="h-32 flex items-center justify-center text-neutral-400 font-mono text-sm opacity-50">
-                                    POWER OFF
+                                <div className="h-32 flex items-center justify-center flex-col text-neutral-400 font-mono text-sm opacity-50">
+                                    <span>POWER OFF</span>
+                                    <span className="text-xs mt-2 text-neutral-500">({userName})</span>
                                 </div>
                             )}
                         </div>
 
+                        {/* Controls */}
                         <div className="p-6 flex flex-col gap-6 z-10 bg-neutral-800">
                             
                             <div className="h-16 bg-gray-900 rounded-lg border border-gray-700 overflow-hidden relative shadow-inner">
@@ -554,7 +659,7 @@
 
                             <div className="relative group">
                                 <button
-                                    disabled={!powerOn}
+                                    disabled={!powerOn || isAlone}
                                     onMouseDown={startTransmission}
                                     onMouseUp={stopTransmission}
                                     onMouseLeave={stopTransmission}
@@ -565,25 +670,31 @@
                                         border-b-8 active:border-b-0 active:translate-y-2 select-none
                                         flex items-center justify-center gap-3
                                         ${powerOn 
-                                        ? 'bg-orange-600 border-orange-800 hover:bg-orange-500 cursor-pointer' 
-                                        : 'bg-neutral-600 border-neutral-700 cursor-not-allowed opacity-50'}
+                                            ? isAlone
+                                                ? 'bg-neutral-600 border-neutral-700 cursor-not-allowed opacity-70' 
+                                                : 'bg-orange-600 border-orange-800 hover:bg-orange-500 cursor-pointer' 
+                                            : 'bg-neutral-600 border-neutral-700 cursor-not-allowed opacity-50'}
                                     `}
                                 >
-                                    <Mic className={`${isTransmitting ? 'animate-pulse' : ''}`} />
-                                    <span>{isTransmitting ? 'TRANSMITTING' : 'PUSH TO TALK'}</span>
+                                    {isAlone && powerOn ? (
+                                        <>
+                                            <Lock size={20} className="text-neutral-400" />
+                                            <span className="text-sm">WAITING FOR USERS...</span>
+                                        </>
+                                    ) : (
+                                        <>
+                                            <Mic className={`${isTransmitting ? 'animate-pulse' : ''}`} />
+                                            <span>{isTransmitting ? 'TRANSMITTING' : 'PUSH TO TALK'}</span>
+                                        </>
+                                    )}
                                 </button>
                                 
                                 <div className="absolute inset-0 pointer-events-none opacity-10 bg-[url('https://www.transparenttextures.com/patterns/diagmonds-light.png')]"></div>
                             </div>
 
                             <div className="mt-2 text-center">
-                                {!userId ? (
-                                    <p className="text-yellow-500 text-xs animate-pulse">Initializing ID...</p>
-                                ) : (
-                                    <div className="flex items-center justify-center gap-2 text-neutral-500 text-xs">
-                                        <Radio size={12} />
-                                        <span>ID: {userName}</span>
-                                    </div>
+                                {isAlone && powerOn && (
+                                    <p className="text-yellow-500 text-xs animate-pulse">កំពុងរង់ចាំអ្នកផ្សេង Online...</p>
                                 )}
                             </div>
                         </div>
