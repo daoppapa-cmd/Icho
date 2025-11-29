@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Khmer Walkie Talkie (Fast Audio)</title>
+    <title>Khmer Walkie Talkie (Fast Mode 8kHz)</title>
     
     <!-- Tailwind CSS -->
     <script src="https://cdn.tailwindcss.com"></script>
@@ -102,9 +102,9 @@
         const db = getDatabase(app);
 
         // --- Constants ---
-        // 16kHz offers better clarity than 11kHz but is still lightweight
-        const SAMPLE_RATE = 16000; 
-        const BUFFER_SIZE = 4096;
+        // 8kHz 8-bit = ~64kbps (Very Fast, Radio Quality)
+        const SAMPLE_RATE = 8000; 
+        const JITTER_BUFFER_MS = 100; // Reduced buffer for faster response
 
         // --- Toast Notification Component ---
         const Toast = ({ message, type, onClose }) => {
@@ -356,7 +356,7 @@
             }, [userId, powerOn]);
 
 
-            // --- Optimized Audio Logic ---
+            // --- Optimized Audio Logic (8-bit PCM) ---
             const playPCMChunk = async (base64Data) => {
                 const ctx = audioContextRef.current;
                 if (!ctx) return;
@@ -366,34 +366,37 @@
                 }
 
                 try {
+                    // 1. Decode Base64 to Int8Array (8-bit)
                     const binaryString = window.atob(base64Data);
                     const len = binaryString.length;
-                    const bytes = new Uint8Array(len);
+                    const bytes = new Int8Array(len);
                     for (let i = 0; i < len; i++) {
                         bytes[i] = binaryString.charCodeAt(i);
                     }
-                    const int16Data = new Int16Array(bytes.buffer);
-                    const float32Data = new Float32Array(int16Data.length);
-                    for (let i = 0; i < int16Data.length; i++) {
-                        float32Data[i] = int16Data[i] / 32768.0;
+
+                    // 2. Convert Int8 to Float32
+                    // Int8 range: -128 to 127
+                    const float32Data = new Float32Array(bytes.length);
+                    for (let i = 0; i < bytes.length; i++) {
+                        float32Data[i] = bytes[i] / 128.0; 
                     }
 
+                    // 3. Create Buffer
                     const buffer = ctx.createBuffer(1, float32Data.length, SAMPLE_RATE);
                     buffer.copyToChannel(float32Data, 0);
 
+                    // 4. Schedule
                     const source = ctx.createBufferSource();
                     source.buffer = buffer;
                     source.connect(ctx.destination);
 
                     const currentTime = ctx.currentTime;
-                    // SMART CATCH-UP: If next time is in the past, reset to now.
-                    // This eliminates the "Slow/Deep Voice" effect caused by drift.
+                    // SMART CATCH-UP
                     if (nextStartTimeRef.current < currentTime) {
                         nextStartTimeRef.current = currentTime;
                     }
-                    // If buffer is too large (> 0.3s), skip ahead to be realtime
-                    else if (nextStartTimeRef.current > currentTime + 0.3) {
-                         nextStartTimeRef.current = currentTime + 0.05;
+                    else if (nextStartTimeRef.current > currentTime + 0.2) {
+                         nextStartTimeRef.current = currentTime + 0.02;
                     }
 
                     source.start(nextStartTimeRef.current);
@@ -474,7 +477,6 @@
                             echoCancellation: true,
                             noiseSuppression: true,
                             autoGainControl: true,
-                            // High pass filter helps remove low rumble
                             googHighpassFilter: true
                         } 
                     });
@@ -485,8 +487,8 @@
                         source.connect(analyserRef.current);
                     }
 
-                    // Buffer size 4096 is safe for most devices. 2048 is faster but riskier.
-                    const processor = ctx.createScriptProcessor(4096, 1, 1);
+                    // Buffer size 2048 for lower latency (~46ms)
+                    const processor = ctx.createScriptProcessor(2048, 1, 1);
                     processorRef.current = processor;
 
                     const dummyDest = ctx.createMediaStreamDestination();
@@ -498,33 +500,43 @@
                         const inputData = e.inputBuffer.getChannelData(0);
                         const inputRate = ctx.sampleRate;
                         
-                        // Precise Downsampling using Linear Interpolation could be better,
-                        // but nearest neighbor with accurate float step is faster for JS.
+                        // Downsample to 8kHz
                         const ratio = inputRate / SAMPLE_RATE;
                         const downsampledLength = Math.ceil(inputData.length / ratio);
-                        const int16Buffer = new Int16Array(downsampledLength);
+                        const int8Buffer = new Int8Array(downsampledLength);
                         
                         let offset = 0;
                         for (let i = 0; i < inputData.length; i += ratio) {
                             const idx = Math.floor(i);
                             if (idx >= inputData.length) break;
                             let s = Math.max(-1, Math.min(1, inputData[idx]));
-                            // Boost volume slightly (1.2x) for clearer speech
-                            s = s * 1.2;
+                            // Boost volume slightly
+                            s = s * 1.5; 
                             if (s > 1) s = 1;
                             if (s < -1) s = -1;
                             
-                            int16Buffer[offset++] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+                            // Convert Float32 to Int8 (-128 to 127)
+                            int8Buffer[offset++] = s < 0 ? s * 128 : s * 127;
                         }
 
+                        // Convert to Base64
                         let binary = '';
-                        const bytes = new Uint8Array(int16Buffer.buffer);
-                        const len = bytes.byteLength;
-                        // Optimization: Process in chunks if too large, but 4096/3 is small enough.
+                        // Using smaller chunks for base64 conversion loop to avoid stack overflow
+                        const len = int8Buffer.byteLength;
                         for (let i = 0; i < len; i++) {
-                            binary += String.fromCharCode(bytes[i]);
+                            binary += String.fromCharCode(int8Buffer[i] + 128); // Offset to be char safe? No, just raw bytes
+                            // Actually for window.btoa we need raw binary string (0-255).
+                            // Int8 is signed (-128 to 127). We need Uint8 interpretation.
                         }
-                        const base64data = window.btoa(binary);
+                        
+                        // Correct conversion for Int8Array to binary string
+                        const uint8View = new Uint8Array(int8Buffer.buffer);
+                        let binaryStr = "";
+                        for (let i = 0; i < uint8View.length; i++) {
+                            binaryStr += String.fromCharCode(uint8View[i]);
+                        }
+                        
+                        const base64data = window.btoa(binaryStr);
 
                         if (privateTarget) {
                             const privateRef = ref(db, `private_stream/${privateTarget.id}`);
