@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Khmer Walkie Talkie (Realtime Optimized)</title>
+    <title>Khmer Walkie Talkie (Crystal Clear)</title>
     
     <!-- Tailwind CSS -->
     <script src="https://cdn.tailwindcss.com"></script>
@@ -102,10 +102,10 @@
         const db = getDatabase(app);
 
         // --- Constants ---
-        // 11025Hz provides a good balance between clarity and speed
-        const SAMPLE_RATE = 11025; 
-        const CHUNK_SIZE_MS = 100; // Send audio every 100ms (reduces database overhead)
-        const NOISE_THRESHOLD = 0.01; // Silence detection threshold
+        // 16kHz (16000) for Wideband Speech (Much clearer, less metallic)
+        const SAMPLE_RATE = 16000; 
+        const CHUNK_SIZE_MS = 100; // 100ms buffering
+        const NOISE_THRESHOLD = 0.01; 
 
         // --- Toast Notification Component ---
         const Toast = ({ message, type, onClose }) => {
@@ -130,7 +130,6 @@
             return (
                 <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4 modal-enter">
                     <div className="bg-neutral-800 w-full max-w-sm rounded-3xl border border-neutral-700 shadow-2xl overflow-hidden flex flex-col max-h-[80vh]">
-                        {/* Header */}
                         <div className="bg-neutral-900 p-4 flex justify-between items-center border-b border-neutral-700">
                             <h3 className="text-white font-bold text-lg flex items-center gap-2">
                                 <Users size={20} className="text-green-500"/>
@@ -141,7 +140,6 @@
                             </button>
                         </div>
                         
-                        {/* List */}
                         <div className="overflow-y-auto p-2 flex-1 space-y-2">
                             {users.length === 0 ? (
                                 <div className="text-center text-neutral-500 py-8">គ្មានអ្នកផ្សេង Online ទេ</div>
@@ -218,8 +216,8 @@
             const requestRef = useRef(null);
             const nextStartTimeRef = useRef(0);
             
-            // Buffering Refs for Batch Sending
-            const audioBufferRef = useRef([]); // Stores float samples
+            // Buffering Refs
+            const audioBufferRef = useRef([]); 
             const samplesPerChunk = Math.floor(SAMPLE_RATE * (CHUNK_SIZE_MS / 1000));
 
             // --- Helpers ---
@@ -227,7 +225,7 @@
                 setNotification({ message: msg, type });
             };
 
-            // --- 1. Initialization & Name Handling ---
+            // --- Initialization ---
             useEffect(() => {
                 let storedId = localStorage.getItem('walkie_user_id');
                 if (!storedId) {
@@ -253,39 +251,27 @@
                 }
             };
 
-            // --- 2. Presence System (Online/Offline) ---
+            // --- Presence System ---
             useEffect(() => {
                 if (!userId || !userName) return;
-
                 const userPresenceRef = ref(db, `channels/channel_${currentChannel}/users/${userId}`);
-
                 if (powerOn) {
-                    set(userPresenceRef, {
-                        name: userName,
-                        status: 'online',
-                        lastSeen: serverTimestamp()
-                    });
+                    set(userPresenceRef, { name: userName, status: 'online', lastSeen: serverTimestamp() });
                     onDisconnect(userPresenceRef).remove();
                 } else {
                     remove(userPresenceRef);
                     onDisconnect(userPresenceRef).cancel();
                 }
-
-                return () => {
-                    if (powerOn) remove(userPresenceRef);
-                };
+                return () => { if (powerOn) remove(userPresenceRef); };
             }, [powerOn, userId, userName, currentChannel]);
 
-            // --- 3. Active Users Listener ---
+            // --- Active Users Listener ---
             useEffect(() => {
                 const usersRef = ref(db, `channels/channel_${currentChannel}/users`);
                 const unsubscribe = onValue(usersRef, (snapshot) => {
                     if (snapshot.exists()) {
                         const usersData = snapshot.val();
-                        const usersList = Object.keys(usersData).map(key => ({
-                            id: key,
-                            ...usersData[key]
-                        }));
+                        const usersList = Object.keys(usersData).map(key => ({ id: key, ...usersData[key] }));
                         setOnlineUsers(usersList);
                     } else {
                         setOnlineUsers([]);
@@ -294,19 +280,14 @@
                 return () => unsubscribe();
             }, [currentChannel]);
 
-            // --- 4. Incoming Status Listener (Public) ---
+            // --- Status Listener ---
             useEffect(() => {
                 if (!userId || !powerOn) return;
-
                 const statusRef = ref(db, `channels/channel_${currentChannel}/status`);
                 const unsubscribe = onValue(statusRef, (snapshot) => {
                     const data = snapshot.val();
                     if (data && data.isActive && data.userId !== userId) {
-                        setIncomingTransmission({
-                            userId: data.userId,
-                            userName: data.userName,
-                            type: 'public'
-                        });
+                        setIncomingTransmission({ userId: data.userId, userName: data.userName, type: 'public' });
                     } else {
                         setIncomingTransmission(prev => prev && prev.type === 'private' ? prev : null);
                     }
@@ -314,44 +295,29 @@
                 return () => unsubscribe();
             }, [userId, powerOn, currentChannel]);
 
-            // --- 5. Audio Data Listener (Public) ---
+            // --- Audio Listeners (Public & Private) ---
             useEffect(() => {
                 if (!userId || !powerOn) return;
-
                 const audioRef = ref(db, `channels/channel_${currentChannel}/audio_stream`);
                 const recentQuery = query(audioRef, limitToLast(1)); 
-                
                 const unsubscribe = onChildAdded(recentQuery, (snapshot) => {
                     const data = snapshot.val();
                     if (isTransmittingRef.current) return;
-
-                    if (data && data.userId !== userId && data.pcmData) {
-                         playPCMChunk(data.pcmData);
-                    }
+                    if (data && data.userId !== userId && data.pcmData) playPCMChunk(data.pcmData);
                 });
                 return () => unsubscribe();
             }, [userId, powerOn, currentChannel]);
 
-            // --- 6. Audio Data Listener (PRIVATE) ---
             useEffect(() => {
                 if (!userId || !powerOn) return;
-
                 const privateAudioRef = ref(db, `private_stream/${userId}`);
                 const recentQuery = query(privateAudioRef, limitToLast(1));
-
                 const unsubscribe = onChildAdded(recentQuery, (snapshot) => {
                     const data = snapshot.val();
                     if (isTransmittingRef.current) return;
-
                     if (data && data.pcmData) {
-                        setIncomingTransmission({
-                            userId: data.senderId,
-                            userName: data.senderName,
-                            type: 'private'
-                        });
-                        
+                        setIncomingTransmission({ userId: data.senderId, userName: data.senderName, type: 'private' });
                         playPCMChunk(data.pcmData);
-
                         setTimeout(() => {
                              setIncomingTransmission(prev => prev && prev.type === 'private' && prev.userId === data.senderId ? null : prev);
                         }, 500);
@@ -360,28 +326,20 @@
                 return () => unsubscribe();
             }, [userId, powerOn]);
 
-
-            // --- Optimized Audio Logic (8-bit PCM + Catch Up) ---
+            // --- Optimized Audio Logic (8-bit @ 16kHz) ---
             const playPCMChunk = async (base64Data) => {
                 const ctx = audioContextRef.current;
                 if (!ctx) return;
-
-                if (ctx.state === 'suspended') {
-                    try { await ctx.resume(); } catch(e) {}
-                }
+                if (ctx.state === 'suspended') try { await ctx.resume(); } catch(e) {}
 
                 try {
                     const binaryString = window.atob(base64Data);
                     const len = binaryString.length;
                     const bytes = new Int8Array(len);
-                    for (let i = 0; i < len; i++) {
-                        bytes[i] = binaryString.charCodeAt(i);
-                    }
+                    for (let i = 0; i < len; i++) bytes[i] = binaryString.charCodeAt(i);
 
                     const float32Data = new Float32Array(bytes.length);
-                    for (let i = 0; i < bytes.length; i++) {
-                        float32Data[i] = bytes[i] / 128.0; 
-                    }
+                    for (let i = 0; i < bytes.length; i++) float32Data[i] = bytes[i] / 128.0; 
 
                     const buffer = ctx.createBuffer(1, float32Data.length, SAMPLE_RATE);
                     buffer.copyToChannel(float32Data, 0);
@@ -391,16 +349,9 @@
                     source.connect(ctx.destination);
 
                     const currentTime = ctx.currentTime;
-                    // AGGRESSIVE LATENCY FIX:
-                    // If we are behind, jump to now. 
-                    // If we are too far ahead (latency buildup), skip forward.
-                    if (nextStartTimeRef.current < currentTime) {
-                        nextStartTimeRef.current = currentTime;
-                    } 
-                    else if (nextStartTimeRef.current > currentTime + 0.3) {
-                        // If buffer > 300ms, jump to near-realtime
-                        nextStartTimeRef.current = currentTime + 0.05; 
-                    }
+                    // Latency Correction
+                    if (nextStartTimeRef.current < currentTime) nextStartTimeRef.current = currentTime;
+                    else if (nextStartTimeRef.current > currentTime + 0.3) nextStartTimeRef.current = currentTime + 0.05; 
 
                     source.start(nextStartTimeRef.current);
                     nextStartTimeRef.current += buffer.duration;
@@ -411,37 +362,29 @@
 
             const animate = () => {
                 if (!canvasRef.current || !analyserRef.current) return;
-                
                 const canvas = canvasRef.current;
                 const ctx = canvas.getContext('2d');
                 const analyser = analyserRef.current;
-                
                 const bufferLength = analyser.frequencyBinCount;
                 const dataArray = new Uint8Array(bufferLength);
-
                 analyser.getByteFrequencyData(dataArray);
-
                 ctx.fillStyle = '#1f2937'; 
                 ctx.fillRect(0, 0, canvas.width, canvas.height);
-
                 const barWidth = (canvas.width / bufferLength) * 2.5;
                 let barHeight;
                 let x = 0;
-
                 for (let i = 0; i < bufferLength; i++) {
                     barHeight = dataArray[i] / 2;
                     ctx.fillStyle = `rgb(50, ${barHeight + 100}, 50)`;
                     ctx.fillRect(x, canvas.height - barHeight, barWidth, barHeight);
                     x += barWidth + 1;
                 }
-
                 requestRef.current = requestAnimationFrame(animate);
             };
 
             useEffect(() => {
-                if (isTransmitting && powerOn) {
-                    requestRef.current = requestAnimationFrame(animate);
-                } else {
+                if (isTransmitting && powerOn) requestRef.current = requestAnimationFrame(animate);
+                else {
                     if (requestRef.current) cancelAnimationFrame(requestRef.current);
                     if (canvasRef.current) {
                         const ctx = canvasRef.current.getContext('2d');
@@ -454,74 +397,58 @@
                         ctx.stroke();
                     }
                 }
-                return () => {
-                     if (requestRef.current) cancelAnimationFrame(requestRef.current);
-                };
+                return () => { if (requestRef.current) cancelAnimationFrame(requestRef.current); };
             }, [isTransmitting, powerOn]);
 
             const startTransmission = async (e) => {
                 if(e) e.preventDefault();
-                
                 if (!privateTarget && onlineUsers.length <= 1) {
                     showToast("គ្មានអ្នកផ្សេង Online ទេ។ សូមរង់ចាំ...", "error");
                     return;
                 }
-                
                 if (!powerOn || !userId || incomingTransmission) return;
 
                 try {
                     const ctx = audioContextRef.current;
-                    if (ctx && ctx.state === 'suspended') {
-                        await ctx.resume();
-                    }
+                    if (ctx && ctx.state === 'suspended') await ctx.resume();
 
                     const stream = await navigator.mediaDevices.getUserMedia({ 
                         audio: {
                             echoCancellation: true,
                             noiseSuppression: true,
-                            autoGainControl: true,
-                            googHighpassFilter: true
+                            autoGainControl: true
                         } 
                     });
                     streamRef.current = stream;
                     
                     const source = ctx.createMediaStreamSource(stream);
-                    if (analyserRef.current) {
-                        source.connect(analyserRef.current);
-                    }
+                    if (analyserRef.current) source.connect(analyserRef.current);
 
-                    // 4096 is safe. We handle batching manually.
                     const processor = ctx.createScriptProcessor(4096, 1, 1);
                     processorRef.current = processor;
 
-                    const dummyDest = ctx.createMediaStreamDestination();
+                    // FIX ECHO: Connect to GainNode(0) -> Destination to mute local feedback
+                    const zeroGain = ctx.createGain();
+                    zeroGain.gain.value = 0;
                     source.connect(processor);
-                    processor.connect(dummyDest); 
+                    processor.connect(zeroGain);
+                    zeroGain.connect(ctx.destination);
 
-                    // Clear accumulate buffer
                     audioBufferRef.current = [];
 
                     processor.onaudioprocess = (e) => {
                         if (!streamRef.current) return;
                         const inputData = e.inputBuffer.getChannelData(0);
                         const inputRate = ctx.sampleRate;
-                        
-                        // Downsample
                         const ratio = inputRate / SAMPLE_RATE;
                         
                         for (let i = 0; i < inputData.length; i += ratio) {
                             const idx = Math.floor(i);
                             if (idx >= inputData.length) break;
                             let s = Math.max(-1, Math.min(1, inputData[idx]));
-                            
-                            // Simple VAD (Voice Activity Detection) - Noise Gate
-                            // If very quiet, treat as silence (0) to compress better,
-                            // but here we just pass it. Real optimization: don't push silence.
-                            
                             audioBufferRef.current.push(s);
                         }
 
-                        // Send Batch if ready
                         if (audioBufferRef.current.length >= samplesPerChunk) {
                             sendAudioBatch();
                         }
@@ -533,17 +460,11 @@
                     if (!privateTarget) {
                         const statusRef = ref(db, `channels/channel_${currentChannel}/status`);
                         onDisconnect(statusRef).update({ isActive: false });
-                        await set(statusRef, {
-                            isActive: true,
-                            userId: userId,
-                            userName: userName
-                        });
+                        await set(statusRef, { isActive: true, userId: userId, userName: userName });
                         const audioRef = ref(db, `channels/channel_${currentChannel}/audio_stream`);
                         remove(audioRef);
                     }
-
                     playBeep(600, 0.1);
-
                 } catch (err) {
                     console.error("Error accessing mic:", err);
                     showToast("សូមអនុញ្ញាតឱ្យប្រើប្រាស់មីក្រូហ្វូន", "error");
@@ -554,78 +475,51 @@
 
             const sendAudioBatch = () => {
                 if (audioBufferRef.current.length === 0) return;
-
                 const floatData = audioBufferRef.current;
                 const int8Buffer = new Int8Array(floatData.length);
-                
-                // Check if buffer has significant sound (VAD)
                 let hasSound = false;
                 for(let i=0; i<floatData.length; i++) {
-                    if(Math.abs(floatData[i]) > NOISE_THRESHOLD) {
-                        hasSound = true;
-                    }
-                    // Boost & Convert
-                    let s = floatData[i] * 1.5;
-                    if (s > 1) s = 1;
-                    if (s < -1) s = -1;
+                    if(Math.abs(floatData[i]) > NOISE_THRESHOLD) hasSound = true;
+                    let s = floatData[i] * 1.5; // Boost volume
+                    if (s > 1) s = 1; if (s < -1) s = -1;
                     int8Buffer[i] = s < 0 ? s * 128 : s * 127;
                 }
-
-                // Reset buffer
                 audioBufferRef.current = [];
+                if (!hasSound) return; 
 
-                if (!hasSound) return; // Skip silence
-
-                // Convert to Binary String
                 const uint8View = new Uint8Array(int8Buffer.buffer);
                 let binaryStr = "";
-                // Processing in small chunks to avoid call stack size exceeded
                 const chunkSize = 8192;
                 for (let i = 0; i < uint8View.length; i += chunkSize) {
                     binaryStr += String.fromCharCode.apply(null, uint8View.subarray(i, i + chunkSize));
                 }
-                
                 const base64data = window.btoa(binaryStr);
 
                 if (privateTarget) {
                     const privateRef = ref(db, `private_stream/${privateTarget.id}`);
-                    push(privateRef, {
-                        senderId: userId,
-                        senderName: userName,
-                        pcmData: base64data,
-                        timestamp: serverTimestamp()
-                    });
+                    push(privateRef, { senderId: userId, senderName: userName, pcmData: base64data, timestamp: serverTimestamp() });
                 } else {
                     const audioRef = ref(db, `channels/channel_${currentChannel}/audio_stream`);
-                    push(audioRef, {
-                        userId: userId,
-                        pcmData: base64data,
-                    });
+                    push(audioRef, { userId: userId, pcmData: base64data });
                 }
             };
 
             const stopTransmission = async (e) => {
                 if(e) e.preventDefault();
                 if (!isTransmitting) return;
-
-                // Send remaining data
                 sendAudioBatch();
-
                 if (processorRef.current) {
                     processorRef.current.disconnect();
                     processorRef.current.onaudioprocess = null;
                     processorRef.current = null;
                 }
-
                 if (streamRef.current) {
                     streamRef.current.getTracks().forEach(track => track.stop());
                     streamRef.current = null;
                 }
-
                 setIsTransmitting(false);
                 isTransmittingRef.current = false;
                 playBeep(400, 0.1);
-
                 if (!privateTarget) {
                     const statusRef = ref(db, `channels/channel_${currentChannel}/status`);
                     onDisconnect(statusRef).cancel();
@@ -664,7 +558,6 @@
 
             const togglePower = async (e) => {
                 e.stopPropagation();
-                
                 if (!powerOn) {
                     if (!audioContextRef.current) {
                         const AudioContext = window.AudioContext || window.webkitAudioContext;
@@ -674,22 +567,14 @@
                         anal.fftSize = 256;
                         analyserRef.current = anal;
                         nextStartTimeRef.current = ctx.currentTime;
-                    } else if (audioContextRef.current.state === 'suspended') {
-                        await audioContextRef.current.resume();
-                    }
+                    } else if (audioContextRef.current.state === 'suspended') await audioContextRef.current.resume();
                     
                     setPowerOn(true);
                     setTimeout(() => playBeep(1000, 0.2), 500);
                     showToast("បានបើកម៉ាស៊ីន (Power ON)", "success");
                 } else {
-                    if (streamRef.current) {
-                        streamRef.current.getTracks().forEach(track => track.stop());
-                        streamRef.current = null;
-                    }
-                    if (processorRef.current) {
-                        processorRef.current.disconnect();
-                        processorRef.current = null;
-                    }
+                    if (streamRef.current) { streamRef.current.getTracks().forEach(track => track.stop()); streamRef.current = null; }
+                    if (processorRef.current) { processorRef.current.disconnect(); processorRef.current = null; }
                     setPowerOn(false);
                     isTransmittingRef.current = false;
                     setIsTransmitting(false);
@@ -709,7 +594,7 @@
                 showToast("បានត្រឡប់មកប៉ុស្តិ៍សាធារណៈវិញ", "info");
             };
 
-            // --- UI: Name Input Modal ---
+            // --- UI ---
             if (!isNameSet) {
                 return (
                     <div className="min-h-screen bg-neutral-900 flex items-center justify-center p-4 font-sans text-white">
@@ -721,7 +606,6 @@
                             </div>
                             <h2 className="text-2xl font-bold text-center mb-2">បញ្ចូលឈ្មោះរបស់អ្នក</h2>
                             <p className="text-center text-neutral-400 mb-6 text-sm">សូមដាក់ឈ្មោះដើម្បីឱ្យអ្នកផ្សេងស្គាល់ (Realtime Radio)</p>
-                            
                             <form onSubmit={handleNameSubmit} className="flex flex-col gap-4">
                                 <input 
                                     type="text" 
@@ -732,58 +616,32 @@
                                     autoFocus
                                     maxLength={15}
                                 />
-                                <button 
-                                    type="submit" 
-                                    disabled={!tempName.trim()}
-                                    className="p-4 rounded-xl bg-orange-600 font-bold text-lg disabled:opacity-50 disabled:cursor-not-allowed hover:bg-orange-500 transition-colors shadow-lg"
-                                >
-                                    ចាប់ផ្តើម
-                                </button>
+                                <button type="submit" disabled={!tempName.trim()} className="p-4 rounded-xl bg-orange-600 font-bold text-lg disabled:opacity-50 disabled:cursor-not-allowed hover:bg-orange-500 transition-colors shadow-lg">ចាប់ផ្តើម</button>
                             </form>
                         </div>
                     </div>
                 );
             }
 
-            // --- Render Main App ---
             const isAlone = onlineUsers.length <= 1;
             const isPrivate = !!privateTarget;
 
             return (
                 <div className="min-h-screen bg-neutral-900 flex items-center justify-center p-4 font-sans no-select overflow-hidden touch-none relative">
-                    
                     {notification && <Toast message={notification.message} type={notification.type} onClose={() => setNotification(null)} />}
-
-                    {showUserList && (
-                        <UserListModal 
-                            users={onlineUsers} 
-                            currentUserId={userId} 
-                            onClose={() => setShowUserList(false)}
-                            onSelectUser={handleUserSelect}
-                        />
-                    )}
+                    {showUserList && <UserListModal users={onlineUsers} currentUserId={userId} onClose={() => setShowUserList(false)} onSelectUser={handleUserSelect} />}
 
                     <div className={`relative w-full max-w-sm bg-neutral-800 rounded-[3rem] shadow-2xl border-4 ${isPrivate ? 'border-purple-600' : 'border-neutral-700'} flex flex-col overflow-hidden transition-colors duration-500`}>
-                        
                         <div className="absolute -top-16 right-8 w-6 h-24 bg-neutral-700 rounded-t-lg border-2 border-neutral-600 z-0"></div>
                         <div className={`absolute -top-4 left-8 w-3 h-6 ${isPrivate ? 'bg-purple-600' : 'bg-red-600'} rounded-sm z-0 animate-pulse`}></div>
-
                         <div className="mt-8 mx-auto w-3/4 grid grid-cols-6 gap-1 z-10 opacity-50">
-                        {[...Array(24)].map((_, i) => (
-                            <div key={i} className="w-1.5 h-1.5 bg-black rounded-full"></div>
-                        ))}
+                        {[...Array(24)].map((_, i) => (<div key={i} className="w-1.5 h-1.5 bg-black rounded-full"></div>))}
                         </div>
 
                         <div className={`mx-6 mt-6 p-4 rounded-md shadow-inner border-4 border-neutral-600 relative overflow-hidden transition-colors duration-500 ${isPrivate ? 'bg-purple-200' : 'bg-[#9ea792]'}`}>
                             <div className="absolute inset-0 bg-green-900 opacity-10 pointer-events-none grid grid-cols-12 gap-px"></div>
-                            
-                            {/* Back Button for Private Mode - Larger and clearer */}
                             {isPrivate && powerOn && (
-                                <button 
-                                    onClick={exitPrivateMode}
-                                    className="absolute top-2 left-2 p-2 bg-purple-700/20 text-purple-800 hover:bg-purple-700/30 rounded-full z-20 transition-all active:scale-95 border border-purple-800/20"
-                                    aria-label="Back to Public Channel"
-                                >
+                                <button onClick={exitPrivateMode} className="absolute top-2 left-2 p-2 bg-purple-700/20 text-purple-800 hover:bg-purple-700/30 rounded-full z-20 transition-all active:scale-95 border border-purple-800/20" aria-label="Back to Public Channel">
                                     <ArrowLeft size={24} strokeWidth={2.5} />
                                 </button>
                             )}
@@ -791,7 +649,6 @@
                             {powerOn ? (
                                 <div className="relative z-10 flex flex-col h-32 justify-between">
                                     <div className="flex justify-between items-center text-xs font-mono font-bold text-neutral-800">
-                                        {/* User Count / Back Button Area */}
                                         <div className={`flex items-center gap-1 ${isPrivate ? 'invisible' : 'cursor-pointer hover:text-neutral-600'}`} onClick={() => !isPrivate && setShowUserList(true)}>
                                             {!isPrivate && <Users size={14} />}
                                             {!isPrivate && <span>ON: {onlineUsers.length}</span>}
@@ -818,9 +675,7 @@
                                                 {isPrivate ? (
                                                     <>
                                                         <div className="text-purple-800 text-lg font-bold">PRIVATE</div>
-                                                        <div className="text-purple-600 text-sm font-bold flex items-center gap-1 mt-1">
-                                                            <Lock size={12}/> {privateTarget.name}
-                                                        </div>
+                                                        <div className="text-purple-600 text-sm font-bold flex items-center gap-1 mt-1"><Lock size={12}/> {privateTarget.name}</div>
                                                     </>
                                                 ) : (
                                                     <>
@@ -831,10 +686,7 @@
                                             </div>
                                         )}
                                     </div>
-
-                                    <div className={`text-4xl font-black font-mono text-center tracking-widest opacity-80 ${isPrivate ? 'text-purple-900' : 'text-neutral-800'}`}>
-                                        {currentChannel}
-                                    </div>
+                                    <div className={`text-4xl font-black font-mono text-center tracking-widest opacity-80 ${isPrivate ? 'text-purple-900' : 'text-neutral-800'}`}>{currentChannel}</div>
                                 </div>
                             ) : (
                                 <div className="h-32 flex items-center justify-center flex-col text-neutral-400 font-mono text-sm opacity-50">
@@ -844,45 +696,22 @@
                             )}
                         </div>
 
-                        {/* Controls */}
                         <div className="p-6 flex flex-col gap-6 z-10 bg-neutral-800">
-                            
                             <div className="h-16 bg-gray-900 rounded-lg border border-gray-700 overflow-hidden relative shadow-inner">
-                                <canvas 
-                                    ref={canvasRef} 
-                                    width="300" 
-                                    height="64" 
-                                    className="w-full h-full opacity-80"
-                                />
+                                <canvas ref={canvasRef} width="300" height="64" className="w-full h-full opacity-80" />
                                 <div className="absolute top-1 left-2 text-[10px] text-green-500 font-mono">AUDIO LEVEL</div>
                             </div>
 
                             <div className="flex justify-between items-center px-2">
-                                <button 
-                                    onClick={togglePower}
-                                    className={`p-4 rounded-full border-b-4 active:border-b-0 active:translate-y-1 transition-all ${powerOn ? 'bg-green-600 border-green-800 text-white shadow-[0_0_15px_rgba(34,197,94,0.5)]' : 'bg-red-600 border-red-800 text-white'}`}
-                                >
+                                <button onClick={togglePower} className={`p-4 rounded-full border-b-4 active:border-b-0 active:translate-y-1 transition-all ${powerOn ? 'bg-green-600 border-green-800 text-white shadow-[0_0_15px_rgba(34,197,94,0.5)]' : 'bg-red-600 border-red-800 text-white'}`}>
                                     <Power size={24} />
                                 </button>
-
                                 <div className="flex flex-col items-center gap-2 bg-neutral-900 p-2 rounded-xl border border-neutral-700">
                                     <span className="text-[10px] text-gray-400 uppercase tracking-wider">Channel</span>
                                     <div className="flex items-center gap-3">
-                                        <button 
-                                            disabled={!powerOn || isPrivate}
-                                            onClick={() => handleChannelChange(-1)}
-                                            className="w-10 h-10 bg-neutral-700 rounded-lg flex items-center justify-center active:bg-neutral-600 disabled:opacity-50 text-white"
-                                        >
-                                            -
-                                        </button>
+                                        <button disabled={!powerOn || isPrivate} onClick={() => handleChannelChange(-1)} className="w-10 h-10 bg-neutral-700 rounded-lg flex items-center justify-center active:bg-neutral-600 disabled:opacity-50 text-white">-</button>
                                         <span className={`font-mono text-xl w-6 text-center ${isPrivate ? 'text-purple-500' : 'text-green-500'}`}>{currentChannel}</span>
-                                        <button 
-                                            disabled={!powerOn || isPrivate}
-                                            onClick={() => handleChannelChange(1)}
-                                            className="w-10 h-10 bg-neutral-700 rounded-lg flex items-center justify-center active:bg-neutral-600 disabled:opacity-50 text-white"
-                                        >
-                                            +
-                                        </button>
+                                        <button disabled={!powerOn || isPrivate} onClick={() => handleChannelChange(1)} className="w-10 h-10 bg-neutral-700 rounded-lg flex items-center justify-center active:bg-neutral-600 disabled:opacity-50 text-white">+</button>
                                     </div>
                                 </div>
                             </div>
@@ -920,7 +749,6 @@
                                         </>
                                     )}
                                 </button>
-                                
                                 <div className="absolute inset-0 pointer-events-none opacity-10 bg-[url('https://www.transparenttextures.com/patterns/diagmonds-light.png')]"></div>
                             </div>
 
@@ -928,32 +756,20 @@
                                 {isAlone && powerOn && !isPrivate ? (
                                     <p className="text-yellow-500 text-xs animate-pulse">កំពុងរង់ចាំអ្នកផ្សេង Online...</p>
                                 ) : powerOn ? (
-                                    <button 
-                                        onClick={() => setShowUserList(true)}
-                                        className="text-xs text-neutral-500 hover:text-green-400 flex items-center justify-center gap-1 transition-colors"
-                                    >
-                                        <List size={12} />
-                                        <span>មើលអ្នក Online</span>
+                                    <button onClick={() => setShowUserList(true)} className="text-xs text-neutral-500 hover:text-green-400 flex items-center justify-center gap-1 transition-colors">
+                                        <List size={12} /><span>មើលអ្នក Online</span>
                                     </button>
                                 ) : null}
                             </div>
                         </div>
 
-                        <div className="absolute bottom-4 left-4 w-3 h-3 rounded-full bg-neutral-900 border border-neutral-600 flex items-center justify-center">
-                            <div className="w-full h-0.5 bg-neutral-700 rotate-45"></div>
-                        </div>
-                        <div className="absolute bottom-4 right-4 w-3 h-3 rounded-full bg-neutral-900 border border-neutral-600 flex items-center justify-center">
-                            <div className="w-full h-0.5 bg-neutral-700 rotate-45"></div>
-                        </div>
+                        <div className="absolute bottom-4 left-4 w-3 h-3 rounded-full bg-neutral-900 border border-neutral-600 flex items-center justify-center"><div className="w-full h-0.5 bg-neutral-700 rotate-45"></div></div>
+                        <div className="absolute bottom-4 right-4 w-3 h-3 rounded-full bg-neutral-900 border border-neutral-600 flex items-center justify-center"><div className="w-full h-0.5 bg-neutral-700 rotate-45"></div></div>
                     </div>
 
                     <div className="fixed bottom-4 flex flex-col items-center gap-1 text-neutral-500 text-xs">
                         <p>ចុចប៊ូតុង <span className={`${isPrivate ? 'text-purple-500' : 'text-orange-500'} font-bold`}>PUSH TO TALK</span> ឲ្យជាប់ដើម្បីនិយាយ</p>
-                        <div className="flex items-center gap-1">
-                            <span>ត្រូវប្រាកដថាបានបើក</span>
-                            <Power size={12} className="text-green-500"/>
-                            <span>ជាមុនសិន</span>
-                        </div>
+                        <div className="flex items-center gap-1"><span>ត្រូវប្រាកដថាបានបើក</span><Power size={12} className="text-green-500"/><span>ជាមុនសិន</span></div>
                     </div>
                 </div>
             );
