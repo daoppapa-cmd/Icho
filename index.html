@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Khmer Walkie Talkie (Fast Mode 8kHz)</title>
+    <title>Khmer Walkie Talkie (Realtime Optimized)</title>
     
     <!-- Tailwind CSS -->
     <script src="https://cdn.tailwindcss.com"></script>
@@ -102,9 +102,10 @@
         const db = getDatabase(app);
 
         // --- Constants ---
-        // 8kHz 8-bit = ~64kbps (Very Fast, Radio Quality)
-        const SAMPLE_RATE = 8000; 
-        const JITTER_BUFFER_MS = 100; // Reduced buffer for faster response
+        // 11025Hz provides a good balance between clarity and speed
+        const SAMPLE_RATE = 11025; 
+        const CHUNK_SIZE_MS = 100; // Send audio every 100ms (reduces database overhead)
+        const NOISE_THRESHOLD = 0.01; // Silence detection threshold
 
         // --- Toast Notification Component ---
         const Toast = ({ message, type, onClose }) => {
@@ -216,6 +217,10 @@
             const streamRef = useRef(null);
             const requestRef = useRef(null);
             const nextStartTimeRef = useRef(0);
+            
+            // Buffering Refs for Batch Sending
+            const audioBufferRef = useRef([]); // Stores float samples
+            const samplesPerChunk = Math.floor(SAMPLE_RATE * (CHUNK_SIZE_MS / 1000));
 
             // --- Helpers ---
             const showToast = (msg, type = 'info') => {
@@ -356,7 +361,7 @@
             }, [userId, powerOn]);
 
 
-            // --- Optimized Audio Logic (8-bit PCM) ---
+            // --- Optimized Audio Logic (8-bit PCM + Catch Up) ---
             const playPCMChunk = async (base64Data) => {
                 const ctx = audioContextRef.current;
                 if (!ctx) return;
@@ -366,7 +371,6 @@
                 }
 
                 try {
-                    // 1. Decode Base64 to Int8Array (8-bit)
                     const binaryString = window.atob(base64Data);
                     const len = binaryString.length;
                     const bytes = new Int8Array(len);
@@ -374,29 +378,28 @@
                         bytes[i] = binaryString.charCodeAt(i);
                     }
 
-                    // 2. Convert Int8 to Float32
-                    // Int8 range: -128 to 127
                     const float32Data = new Float32Array(bytes.length);
                     for (let i = 0; i < bytes.length; i++) {
                         float32Data[i] = bytes[i] / 128.0; 
                     }
 
-                    // 3. Create Buffer
                     const buffer = ctx.createBuffer(1, float32Data.length, SAMPLE_RATE);
                     buffer.copyToChannel(float32Data, 0);
 
-                    // 4. Schedule
                     const source = ctx.createBufferSource();
                     source.buffer = buffer;
                     source.connect(ctx.destination);
 
                     const currentTime = ctx.currentTime;
-                    // SMART CATCH-UP
+                    // AGGRESSIVE LATENCY FIX:
+                    // If we are behind, jump to now. 
+                    // If we are too far ahead (latency buildup), skip forward.
                     if (nextStartTimeRef.current < currentTime) {
                         nextStartTimeRef.current = currentTime;
-                    }
-                    else if (nextStartTimeRef.current > currentTime + 0.2) {
-                         nextStartTimeRef.current = currentTime + 0.02;
+                    } 
+                    else if (nextStartTimeRef.current > currentTime + 0.3) {
+                        // If buffer > 300ms, jump to near-realtime
+                        nextStartTimeRef.current = currentTime + 0.05; 
                     }
 
                     source.start(nextStartTimeRef.current);
@@ -487,71 +490,40 @@
                         source.connect(analyserRef.current);
                     }
 
-                    // Buffer size 2048 for lower latency (~46ms)
-                    const processor = ctx.createScriptProcessor(2048, 1, 1);
+                    // 4096 is safe. We handle batching manually.
+                    const processor = ctx.createScriptProcessor(4096, 1, 1);
                     processorRef.current = processor;
 
                     const dummyDest = ctx.createMediaStreamDestination();
                     source.connect(processor);
                     processor.connect(dummyDest); 
 
+                    // Clear accumulate buffer
+                    audioBufferRef.current = [];
+
                     processor.onaudioprocess = (e) => {
                         if (!streamRef.current) return;
                         const inputData = e.inputBuffer.getChannelData(0);
                         const inputRate = ctx.sampleRate;
                         
-                        // Downsample to 8kHz
+                        // Downsample
                         const ratio = inputRate / SAMPLE_RATE;
-                        const downsampledLength = Math.ceil(inputData.length / ratio);
-                        const int8Buffer = new Int8Array(downsampledLength);
                         
-                        let offset = 0;
                         for (let i = 0; i < inputData.length; i += ratio) {
                             const idx = Math.floor(i);
                             if (idx >= inputData.length) break;
                             let s = Math.max(-1, Math.min(1, inputData[idx]));
-                            // Boost volume slightly
-                            s = s * 1.5; 
-                            if (s > 1) s = 1;
-                            if (s < -1) s = -1;
                             
-                            // Convert Float32 to Int8 (-128 to 127)
-                            int8Buffer[offset++] = s < 0 ? s * 128 : s * 127;
+                            // Simple VAD (Voice Activity Detection) - Noise Gate
+                            // If very quiet, treat as silence (0) to compress better,
+                            // but here we just pass it. Real optimization: don't push silence.
+                            
+                            audioBufferRef.current.push(s);
                         }
 
-                        // Convert to Base64
-                        let binary = '';
-                        // Using smaller chunks for base64 conversion loop to avoid stack overflow
-                        const len = int8Buffer.byteLength;
-                        for (let i = 0; i < len; i++) {
-                            binary += String.fromCharCode(int8Buffer[i] + 128); // Offset to be char safe? No, just raw bytes
-                            // Actually for window.btoa we need raw binary string (0-255).
-                            // Int8 is signed (-128 to 127). We need Uint8 interpretation.
-                        }
-                        
-                        // Correct conversion for Int8Array to binary string
-                        const uint8View = new Uint8Array(int8Buffer.buffer);
-                        let binaryStr = "";
-                        for (let i = 0; i < uint8View.length; i++) {
-                            binaryStr += String.fromCharCode(uint8View[i]);
-                        }
-                        
-                        const base64data = window.btoa(binaryStr);
-
-                        if (privateTarget) {
-                            const privateRef = ref(db, `private_stream/${privateTarget.id}`);
-                            push(privateRef, {
-                                senderId: userId,
-                                senderName: userName,
-                                pcmData: base64data,
-                                timestamp: serverTimestamp()
-                            });
-                        } else {
-                            const audioRef = ref(db, `channels/channel_${currentChannel}/audio_stream`);
-                            push(audioRef, {
-                                userId: userId,
-                                pcmData: base64data,
-                            });
+                        // Send Batch if ready
+                        if (audioBufferRef.current.length >= samplesPerChunk) {
+                            sendAudioBatch();
                         }
                     };
 
@@ -580,9 +552,64 @@
                 }
             };
 
+            const sendAudioBatch = () => {
+                if (audioBufferRef.current.length === 0) return;
+
+                const floatData = audioBufferRef.current;
+                const int8Buffer = new Int8Array(floatData.length);
+                
+                // Check if buffer has significant sound (VAD)
+                let hasSound = false;
+                for(let i=0; i<floatData.length; i++) {
+                    if(Math.abs(floatData[i]) > NOISE_THRESHOLD) {
+                        hasSound = true;
+                    }
+                    // Boost & Convert
+                    let s = floatData[i] * 1.5;
+                    if (s > 1) s = 1;
+                    if (s < -1) s = -1;
+                    int8Buffer[i] = s < 0 ? s * 128 : s * 127;
+                }
+
+                // Reset buffer
+                audioBufferRef.current = [];
+
+                if (!hasSound) return; // Skip silence
+
+                // Convert to Binary String
+                const uint8View = new Uint8Array(int8Buffer.buffer);
+                let binaryStr = "";
+                // Processing in small chunks to avoid call stack size exceeded
+                const chunkSize = 8192;
+                for (let i = 0; i < uint8View.length; i += chunkSize) {
+                    binaryStr += String.fromCharCode.apply(null, uint8View.subarray(i, i + chunkSize));
+                }
+                
+                const base64data = window.btoa(binaryStr);
+
+                if (privateTarget) {
+                    const privateRef = ref(db, `private_stream/${privateTarget.id}`);
+                    push(privateRef, {
+                        senderId: userId,
+                        senderName: userName,
+                        pcmData: base64data,
+                        timestamp: serverTimestamp()
+                    });
+                } else {
+                    const audioRef = ref(db, `channels/channel_${currentChannel}/audio_stream`);
+                    push(audioRef, {
+                        userId: userId,
+                        pcmData: base64data,
+                    });
+                }
+            };
+
             const stopTransmission = async (e) => {
                 if(e) e.preventDefault();
                 if (!isTransmitting) return;
+
+                // Send remaining data
+                sendAudioBatch();
 
                 if (processorRef.current) {
                     processorRef.current.disconnect();
@@ -794,7 +821,6 @@
                                                         <div className="text-purple-600 text-sm font-bold flex items-center gap-1 mt-1">
                                                             <Lock size={12}/> {privateTarget.name}
                                                         </div>
-                                                        {/* Removed redundant button as per request */}
                                                     </>
                                                 ) : (
                                                     <>
